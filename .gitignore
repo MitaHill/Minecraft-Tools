@@ -1,0 +1,17 @@
+.DS_Store
+.idea/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+*.log
+*.db
+*.db-*
+.env
+*.local.toml
+cicd.yaml
+admin_config.json
+/tools/admin/config/frp-server-list-*.json

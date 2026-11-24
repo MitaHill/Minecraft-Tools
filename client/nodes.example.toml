@@ -1,0 +1,6 @@
+[[nodes]]
+name = "本地测试节点"
+server_addr = "127.0.0.1"
+server_port = 7000
+# token = "填写服务端配置的 token"
+# public_host = "玩家连接用的域名"

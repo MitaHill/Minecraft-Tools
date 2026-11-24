@@ -1,0 +1,100 @@
+# 客户端更新与节点构建计划
+
+本页记录下一阶段的实现目标。当前仓库的操作步骤见 [构建说明](build.md)。
+
+## 旧版更新器源码复核
+
+重构前的 Windows 安装包将 `src_launcher/launcher.py` 打包为 `launcher.exe`，快捷方式指向它。代码的执行顺序如下。
+
+1. 读取 Inno Setup 写入的 `Documents/MitaHillFRP/install_info.json`，获取安装路径、主程序路径、版本和通道。缺省版本是 `0.0.0`，缺省通道是 `stable`。
+2. 优先处理 `pending_update`。有 SHA-256 时校验安装包，校验失败会尝试清理文件和任务。缺少摘要时仍允许继续。通常会弹窗询问是否安装，调用安装程序后立即清除任务，安装结果由安装程序处理。
+3. 没有启动安装程序时，按记录或候选路径启动主程序，观察进程是否在五秒内退出。启动失败时记录日志并尝试显示 Windows 错误提示。
+4. 主程序启动后，请求旧服务的 `version.json`。`stable` 选择稳定版，`dev` 比较两边版本，可能选中更新的 `stable`。旧格式的单条版本记录也会直接参与判断。版本比较按点分数字处理，无法用于当前仓库的 `yyyy-mm-dd-n`。
+5. 发现目标版本更新时，将 Windows 安装包流式下载到用户目录，发送进度通知，并把路径、版本、通道和摘要写进 `pending_update`，留到下一次启动处理。目标版本相等时清理下载目录中的旧安装包。本地版本更高时跳过更新。
+
+备份里还有两条独立路径。`src_updater/main.py` 接收已下载的新 EXE，等待旧进程和文件锁，尝试备份、替换、失败回滚和重启，使用 PySide6 和 `psutil`。`src_updater/launcher.py` 是另一套 PySide6 启动器，会从单条版本记录检查并下载 Windows EXE，用户确认后直接覆盖并启动。这两个入口均未进入当前仓库的六平台构建。
+
+当前工作树和已生成的 macOS 压缩包均没有独立更新器。现有 CI 中的 `fetch_frpc.py` 用于构建阶段获取上游 `frpc`。
+
+## 主体程序和小型更新器
+
+- **主体程序**负责映射、`frpc` 和大厅，在本地从内置节点列表填充线路选择。
+- **Launcher** 是发布包的正常启动入口，负责网络检查、更新、启动主体程序及启动失败诊断。使用独立的本机可执行文件，优先选标准库和必要的系统 API。用户机器无需额外安装 Python、Qt 等运行环境。
+
+### 启动和强制更新
+
+1. 显示 Launcher 小窗口，检查本机网络。明确断网时弹窗报错，关闭提示后退出，不发送日志。网络状态不明时交给总控制端连通测试判断。
+2. 在本地记录设备和系统摘要，包括操作系统名称、系统版本、架构和 Launcher 版本，供启动失败时诊断。
+3. 请求总控制端的 HTTPS 健康检查接口。每次请求设超时。首次失败后最多重试 10 次，每次重试前等待 3 秒。成功即继续，全部失败时弹窗报错，关闭提示后退出，不发送日志。
+4. 读取本机所选更新通道和实际安装版本，按下文规则检查更新。安装信息损坏时显示修复提示。找到更新就显示进度，在本次启动中完成下载、校验和安装。确认无更新则继续启动当前版本。检查、下载、校验和安装期间窗口保持响应，主体程序等待。替换文件前等待同一安装下运行中的主体程序正常退出。
+5. 启动主体程序，等待就绪信号。信号有效时关闭 Launcher。进程无法创建、就绪前退出或启动超时时，进入启动失败诊断。
+
+更新源检查失败时显示错误并退出，不发送日志。下载、校验或安装失败时显示错误，提供「重试」和「退出」。已确认的必更状态和可恢复的旧安装会保留，重新打开 Launcher 后继续更新。
+
+### dev 和 stable 的更新规则
+
+本机所选通道和实际安装的构建分别记录。所有候选产物都要匹配当前操作系统与架构，并与**实际安装的版本号**比较。`yyyy-mm-dd-n` 按日期、当天序号的顺序比较。
+
+| 本机所选通道 | 检查结果 | 处理方式 |
+| --- | --- | --- |
+| `stable` | stable 有更高版本 | 安装 stable |
+| `dev` | dev 有更高版本 | 优先安装 dev，即使 stable 版本更高 |
+| `dev` | 已确认 dev 无更高版本，stable 有更高版本 | 安装 stable，保留本机的 `dev` 选择 |
+| 任一通道 | 按规则检查完毕，没有更高版本 | 启动当前版本 |
+
+dev 查询失败时结束本次检查。只有确认 dev 无更高版本时才检查 stable。切到 stable 后，下次启动依旧先查 dev，等 dev 版本号高于已安装的 stable 才切回。节点清单取自实际安装的构建。
+
+### 主体程序就绪与 30 秒超时
+
+Launcher 启动主体程序前，先在 `127.0.0.1` 的临时端口监听，通过子进程环境传入端口和一次性随机值。主体程序完成所需初始化且主窗口可用后，连回该端口发送 `READY` 和随机值。Launcher 收到并验证信号后关闭监听和小窗口，然后退出。[Rust TCP 监听](https://doc.rust-lang.org/std/net/struct.TcpListener.html) · [Python 套接字](https://docs.python.org/3/library/socket.html)
+
+从主体进程成功创建时开始计时，**30 秒内未收到有效的 `READY` 就自动弹窗报错**，进入启动失败诊断。30 秒只用于等待主体程序就绪。进程无法创建或在发送 `READY` 前退出时，立即报错。
+
+### 启动失败诊断
+
+- 启动主体程序失败后，先保存本地诊断，再自动通过 HTTPS 上报到拟新增的总控制端诊断接口。报告仅包含所选通道、实际构建版本与通道、系统与架构、失败阶段、可用的退出码和经过脱敏的相关日志片段。
+- 窗口显示错误摘要、日志位置和上报状态。发送有独立的超时，失败时保留本地报告。
+
+### 客户端数据目录
+
+配置、安装状态和日志保存在用户数据目录，更新时只替换程序文件。`settings.json` 保存用户偏好。Launcher 管理 `install.json`，记录所选更新通道、实际安装的构建通道与版本。Launcher 和主体程序分别写入 `launcher.log` 和 `client.log`。
+
+| 系统 | 配置和安装状态 | 日志 | 可清理的更新缓存 |
+| --- | --- | --- | --- |
+| Windows | `%LOCALAPPDATA%\MitaHill\MinecraftFRP\` | 同根目录的 `logs\` | 同根目录的 `cache\` |
+| macOS | `~/Library/Application Support/com.mitahill.minecraftfrp/` | `~/Library/Logs/com.mitahill.minecraftfrp/` | `~/Library/Caches/com.mitahill.minecraftfrp/` |
+| Linux | 配置用 `$XDG_CONFIG_HOME/minecraftfrp/`，安装状态用 `$XDG_STATE_HOME/minecraftfrp/` | `$XDG_STATE_HOME/minecraftfrp/logs/` | `$XDG_CACHE_HOME/minecraftfrp/` |
+
+Linux 未设置对应变量时，依次使用 `~/.config`、`~/.local/state` 和 `~/.cache`。更新临时文件进入缓存，恢复安装所需的状态单独保存。[Windows Known Folders](https://learn.microsoft.com/windows/win32/shell/knownfolderid) · [macOS 应用数据目录](https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/AccessingFilesandDirectories/AccessingFilesandDirectories.html) · [XDG 目录规范](https://specifications.freedesktop.org/basedir/)
+
+### 开屏窗口
+
+Launcher 用一个无边框窗口显示现有开屏图，窗口随实际启动进度打开和关闭。主体程序初始化完成后直接显示主窗口并发送 `READY`。[开屏图](../client/src/minecraftfrp/MinecraftToolsStartupLogo.png)
+
+开屏图右下角叠一行右对齐的白色小字，随启动阶段更新，例如「检查网络」「尝试连接服务器」「检查更新」「下载更新 42%」「正在启动」。文字与图边留出内距，遇到亮色纹理时加局部深色衬底，保持小字清楚。
+
+首选 **Rust + Slint**，启用 Winit 和软件渲染，仅编译所需特性。检查时可显示不定进度，拿到下载总量后显示实际百分比。发生错误时在同一窗口显示错误摘要及适用的「重试」「退出」按钮。网络和文件处理放到工作线程，界面线程处理绘制和按钮事件。[Slint Winit 后端](https://docs.slint.dev/latest/docs/slint/guide/backends-and-renderers/backend_winit/) · [进度条控件](https://docs.slint.dev/latest/docs/slint/reference/std-widgets/basic-widgets/progressindicator/)
+
+在六种系统与架构组合实测发布体积、冷启动、中文显示和系统依赖。重点验证 Windows ARM64 原生运行及 Linux 的 X11、Wayland。若采用 Slint 桌面免版税许可，将署名放在下载页上。[Slint Windows 支持](https://docs.slint.dev/latest/docs/slint/guide/platforms/desktop/windows/general/) · [Slint 许可条款](https://slint.dev/terms-and-conditions)
+
+### 安装可靠性
+
+- 使用单实例锁、明确的网络超时和有限重试。用更新器内置的发布公钥验证元数据签名，下载到独立的临时位置，核对包大小和 SHA-256 后安装。元数据绑定通道、版本、操作系统及架构。
+- 在可写的用户安装位置暂存完整新版，再切换应用目录或应用包。保留可恢复的旧文件，直到新版本通过启动检查。中途退出、掉电或启动失败时，下一次运行能够恢复到完整安装。用户设置和日志独立保存。
+- Windows 验证进程退出和文件锁处理。macOS 验证完整 `.app` 的替换、签名和公证。Linux 验证架构、执行权限和完整目录切换。六种系统与架构组合都要验证断网退出且无上报、dev 回退后保留所选通道、包损坏、磁盘空间不足、文件占用、重复启动、中途退出后的恢复，以及主体程序就绪、提前退出或 30 秒超时时的处理。
+- 体积上限、安装包格式和更新器自身的升级方式留待实现前确定。CI 应报告六种更新器产物的大小。
+
+## GitHub Actions 发布与节点写入
+
+### 发布通道
+
+- 沿用 `yyyy-mm-dd-n` 作为安装版本号。拟保留 `stable` 的现有日期标签，`dev` 使用 `dev-yyyy-mm-dd-n` 标签并发为 GitHub 预发布。按通道筛选发布记录与已验证的元数据。GitHub 的 `/releases/latest` 排除预发布，无法用于查找 `dev`。[GitHub Releases API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
+- 每个通道的发布都构建 Windows、macOS、Linux 的 amd64 和 arm64 产物。六组产物、配套元数据及基本安装和更新测试通过后，版本才对更新器可见。日常测试构建仅使用测试节点并生成 CI 产物。
+
+### 在构建时写入节点数据
+
+1. 为 `dev` 和 `stable` 使用对应的 GitHub Actions Environment。公开节点配置用环境 Variables。需要限制 GitHub 中查看权限的构建输入可用环境 Secrets，签名私钥等发布凭据只在对应 CI 作业中使用。[GitHub Actions Environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments) · [GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
+2. 每次 CI 打包前校验节点列表，再生成供主体程序导入的 Python 源码。新增的只读节点目录类只存放节点记录及顺序。沿用现有 `Node` 字段 `name`、`server_addr`、`server_port`、可选 `public_host` 和可随客户端分发的节点 token。缺少节点、字段错误或名称冲突时中止发布构建。六种系统与架构组合使用同一份通道节点数据，生成文件留在构建工作区。
+3. 主体程序直接从节点目录类填充「映射」页的线路下拉框，移除「加载节点」、文件选择器、`--nodes`、保存上次节点文件路径和 TOML 导入解析。保留节点选择及供 `frpc` 使用的临时配置生成。修改内置节点后，通过对应通道发新版下发。
+
+写入公开发布包的值可被用户提取，包括节点 token。任何必须保密的凭据只保存在 CI 或服务端。macOS Keychain 如用于导入 CI 签名证书，属于签名步骤。
