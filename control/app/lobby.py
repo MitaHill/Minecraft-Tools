@@ -148,10 +148,6 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
-def denied(message: str) -> dict:
-    return {"success": False, "message": message}
-
-
 async def game_status(host: str, port: int):
     try:
         async with timeout(MAX_PROBE_SECONDS):
@@ -252,33 +248,46 @@ def room_upsert(
 async def publish_room(room: RoomCreate, request: Request):
     settings = request.app.state.lobby_settings
     host = canonical_host(room.server_addr)
-    if (host, room.remote_port) not in settings.targets:
-        return denied("Validation failed")
-    for text, label in ((room.room_name, "房间名"), (room.description or "", "简介")):
-        if any(word in text.casefold() for word in settings.blocked_words):
-            return denied(f"{label}包含敏感词")
+    port = room.remote_port
+    owner = client_ip(request)
 
-    status = await game_status(host, room.remote_port)
+    def deny(message: str, reason: str) -> dict:
+        # Clients renew every 5 seconds, so a broken tunnel logs at that rate.
+        logger.warning(
+            "Lobby publish rejected: %s (%s:%d from %s)", reason, host, port, owner
+        )
+        return {"success": False, "message": message}
+
+    if (host, port) not in settings.targets:
+        return deny("该端口未开放大厅发布", "target not allowlisted")
+    for text, label, field in (
+        (room.room_name, "房间名", "room name"),
+        (room.description or "", "简介", "description"),
+    ):
+        if any(word in text.casefold() for word in settings.blocked_words):
+            return deny(f"{label}包含敏感词", f"blocked word in {field}")
+
+    status = await game_status(host, port)
     if status is None:
-        return denied("Validation failed")
+        return deny("未探测到 Minecraft 服务器", "no Minecraft status")
     motd = status.motd.to_plain()[:200]
     if room.is_public and any(
         word in motd.casefold() for word in settings.blocked_words
     ):
-        return denied("Validation failed")
+        return deny("服务器简介包含敏感词", "blocked word in MOTD")
     room = room.model_copy(update={"server_addr": host})
     result = await run_in_threadpool(
         save_room,
         request.app.state.database,
         room,
-        client_ip(request),
+        owner,
         status.version.name,
         motd,
     )
     if result == "blocked":
-        return denied("隧道已封禁")
+        return deny("隧道已封禁", "tunnel blocked")
     if result == "owner_conflict":
-        return denied("禁止多开，此IP已被占用")
+        return deny("禁止多开，此IP已被占用", "room already owned by this IP")
     return {"success": True, "message": "Room updated"}
 
 

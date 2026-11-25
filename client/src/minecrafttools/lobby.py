@@ -129,7 +129,7 @@ class LobbyTab(QWidget):
             if reply.error() == QNetworkReply.NetworkError.NoError:
                 try:
                     candidate = json.loads(reply.readAll().data())
-                    if isinstance(candidate, dict) and candidate.get("success") is True:
+                    if isinstance(candidate, dict):
                         data = candidate
                 except (ValueError, UnicodeError):
                     pass
@@ -171,7 +171,7 @@ class LobbyTab(QWidget):
             self.show_online(data)
 
         def registered(data):
-            if data and self.presence_timer.isActive():
+            if data.get("success") is True and self.presence_timer.isActive():
                 self.request(b"GET", "online", counted)
             else:
                 counted({})
@@ -224,7 +224,15 @@ class LobbyTab(QWidget):
         def finished(data):
             self.publication_pending = False
             if method == b"POST" and self.active_room is room:
-                status = "房间已发布到联机大厅。" if data else "房间发布失败，请确认游戏服务器可从公网访问。"
+                if data.get("success") is True:
+                    status = "房间已发布到联机大厅。"
+                else:
+                    reason = data.get("message")
+                    status = (
+                        f"房间发布失败：{reason}"
+                        if isinstance(reason, str) and reason
+                        else "房间发布失败，请确认游戏服务器可从公网访问。"
+                    )
                 if status != self.announcement:
                     self.announcement = status
                     self.publication_status.emit(status)

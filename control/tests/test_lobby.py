@@ -228,7 +228,7 @@ class LobbyTests(unittest.TestCase):
         unauthorized = {**self.room, "server_addr": "127.0.0.2"}
         response = self.http.post("/api/lobby/rooms", json=unauthorized)
         self.assertEqual(
-            response.json(), {"success": False, "message": "Validation failed"}
+            response.json(), {"success": False, "message": "该端口未开放大厅发布"}
         )
         oversized = {**self.room, "room_name": "x" * 51}
         self.assertEqual(
@@ -253,7 +253,7 @@ class LobbyTests(unittest.TestCase):
             ):
                 response = self.http.post("/api/lobby/rooms", json=room)
             self.assertEqual(
-                response.json(), {"success": False, "message": "Validation failed"}
+                response.json(), {"success": False, "message": "未探测到 Minecraft 服务器"}
             )
 
     def test_housekeeping_expires_rooms_without_recent_renewal(self):

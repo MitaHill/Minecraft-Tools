@@ -35,3 +35,21 @@ class LobbyPresenceTests(unittest.TestCase):
         self.assertTrue(lobby.presence_timer.isActive())
         lobby.hide()
         self.assertFalse(lobby.presence_timer.isActive())
+
+    def test_publish_failure_shows_the_server_reason(self):
+        with patch.dict("os.environ", {"MINECRAFTTOOLS_LOBBY_URL": "http://127.0.0.1/api/v1/lobby"}):
+            lobby = LobbyTab()
+        self.addCleanup(lobby.close)
+        lobby.request = Mock()
+
+        lobby.publish({"node_id": 1, "remote_port": 30001, "full_room_code": "30001_1"})
+        post = lobby.request.call_args
+        self.assertEqual(post.args[:2], (b"POST", "rooms"))
+
+        post.args[2]({"success": False, "message": "未探测到 Minecraft 服务器"})
+        self.assertEqual(lobby.announcement, "房间发布失败：未探测到 Minecraft 服务器")
+
+        post.args[2]({"success": False})
+        self.assertEqual(
+            lobby.announcement, "房间发布失败，请确认游戏服务器可从公网访问。"
+        )
