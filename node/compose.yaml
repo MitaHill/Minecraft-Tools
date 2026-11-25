@@ -1,0 +1,92 @@
+services:
+  node-net:
+    image: alpine:3.22
+    command: ["tail", "-f", "/dev/null"]
+    networks: [node]
+    ports:
+      - "${NODE_BIND_ADDRESS:-0.0.0.0}:${FRP_PUBLIC_CONTROL_PORT:-7000}:7000"
+      - "${NODE_BIND_ADDRESS:-0.0.0.0}:${NODE_PORT_START:-30000}-${NODE_PORT_END:-30100}:${NODE_PORT_START:-30000}-${NODE_PORT_END:-30100}"
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  firewall:
+    image: minecrafttools-node:local
+    build: .
+    command: ["firewall-helper"]
+    user: "0:10001"
+    network_mode: "service:node-net"
+    depends_on:
+      node-net:
+        condition: service_started
+        restart: true
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NODE_PORT_START: ${NODE_PORT_START:-30000}
+      NODE_PORT_END: ${NODE_PORT_END:-30100}
+    volumes:
+      - firewall-data:/var/lib/minecrafttools-firewall
+      - firewall-run:/run/minecrafttools
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/frp-agent", "firewall-health"]
+      interval: 3s
+      timeout: 2s
+      retries: 6
+    restart: unless-stopped
+
+  agent:
+    image: minecrafttools-node:local
+    build: .
+    networks: [node]
+    depends_on:
+      firewall:
+        condition: service_healthy
+        restart: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      CONTROL_URL: ${CONTROL_URL:?set CONTROL_URL}
+      CONTROL_CA_FILE: /run/node-secrets/control-ca.pem
+      NODE_ID: ${NODE_ID:?set NODE_ID}
+      NODE_SECRET_FILE: /run/node-secrets/node-secret
+      NODE_PORT_START: ${NODE_PORT_START:-30000}
+      NODE_PORT_END: ${NODE_PORT_END:-30100}
+      FRPS_ADMIN_URL: http://node-net:7400
+      FRPS_ADMIN_USER: ${FRPS_ADMIN_USER:-admin}
+      FRPS_ADMIN_PASSWORD_FILE: /run/node-secrets/frps-admin-password
+      PLUGIN_LISTEN: 0.0.0.0:9000
+    volumes:
+      - node-data:/data
+      - firewall-run:/run/minecrafttools
+      - ${NODE_SECRETS_DIRECTORY:?set NODE_SECRETS_DIRECTORY}:/run/node-secrets:ro
+    restart: unless-stopped
+
+  frps:
+    image: minecrafttools-node:local
+    build: .
+    command: ["frps", "-c", "/etc/frp/frps.toml"]
+    user: "10001:10001"
+    network_mode: "service:node-net"
+    depends_on:
+      node-net:
+        condition: service_started
+        restart: true
+      firewall:
+        condition: service_healthy
+        restart: true
+      agent:
+        condition: service_started
+    cap_drop: [ALL]
+    volumes:
+      - ${FRPS_CONFIG:?set FRPS_CONFIG}:/etc/frp/frps.toml:ro
+    restart: unless-stopped
+
+networks:
+  node:
+    driver: bridge
+
+volumes:
+  node-data:
+  firewall-data:
+  firewall-run:
