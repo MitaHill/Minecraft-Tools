@@ -7,4 +7,3 @@ server_port = 7000
 # remote_port_start = 30000
 # remote_port_end = 30100
 # node_id = "control-registered-id"
-# tls_ca_file = "local-node-ca.pem"

@@ -7,16 +7,14 @@ from minecrafttools.config import Node, TunnelClaim, load_nodes, write_frpc_conf
 
 
 class ConfigTests(unittest.TestCase):
-    def test_managed_config_uses_proxy_metadata_and_verifies_frps_certificate(self):
+    def test_managed_config_uses_proxy_metadata_over_plain_tcp(self):
         claim = TunnelClaim("abc", "minecraft-abc", "test-proof")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "frpc.toml"
             node = Node("Managed", "localhost", 7000)
             write_frpc_config(path, node, 25565, 25566, claim)
             config = tomllib.loads(path.read_text())
-            self.assertEqual(
-                config["transport"]["tls"], {"enable": True, "useSystemCa": True}
-            )
+            self.assertEqual(config["transport"]["tls"], {"enable": False})
             (proxy,) = config["proxies"]
             self.assertEqual(proxy["name"], "minecraft-abc")
             self.assertEqual(
@@ -31,6 +29,7 @@ class ConfigTests(unittest.TestCase):
             config = tomllib.loads(path.read_text(encoding="utf-8"))
 
         self.assertEqual(config["auth"], {"method": "token", "token": node.token})
+        self.assertEqual(config["transport"]["tls"], {"enable": False})
         self.assertEqual(config["proxies"][0]["type"], "tcp")
         self.assertEqual(config["proxies"][0]["localPort"], 25565)
         self.assertEqual(config["proxies"][0]["remotePort"], 25566)

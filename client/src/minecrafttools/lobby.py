@@ -83,6 +83,10 @@ class LobbyTab(QWidget):
         self.heartbeat = QTimer(self)
         self.heartbeat.setInterval(5000)
         self.heartbeat.timeout.connect(self.sync_publication)
+        self.presence_timer = QTimer(self)
+        self.presence_timer.setInterval(5000)
+        self.presence_timer.timeout.connect(self.sync_presence)
+        self.presence_pending = False
         self.visited = False
 
         layout = QVBoxLayout(self)
@@ -134,9 +138,19 @@ class LobbyTab(QWidget):
 
         reply.finished.connect(finished)
 
-    def load_once(self):
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self.api:
+            return
+        self.presence_timer.start()
         if not self.visited:
             self.refresh_rooms()
+        else:
+            self.sync_presence()
+
+    def hideEvent(self, event):
+        self.presence_timer.stop()
+        super().hideEvent(event)
 
     def refresh_rooms(self):
         if not self.api:
@@ -145,7 +159,24 @@ class LobbyTab(QWidget):
         self.refresh_button.setEnabled(False)
         self.status.setText("正在加载房间列表…")
         self.request(b"GET", "rooms", self.show_rooms)
-        self.request(b"GET", "online", self.show_online)
+        self.sync_presence()
+
+    def sync_presence(self):
+        if self.presence_pending:
+            return
+        self.presence_pending = True
+
+        def counted(data):
+            self.presence_pending = False
+            self.show_online(data)
+
+        def registered(data):
+            if data and self.presence_timer.isActive():
+                self.request(b"GET", "online", counted)
+            else:
+                counted({})
+
+        self.request(b"POST", "heartbeat", registered, {})
 
     def show_online(self, data):
         count = data.get("online_count")

@@ -3,7 +3,7 @@ import json
 import re
 import tomllib
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -17,7 +17,6 @@ class Node:
     remote_port_start: int | None = None
     remote_port_end: int | None = None
     node_id: str = ""
-    tls_ca_file: str = ""
 
     def address(self, port: int) -> str:
         host = self.public_host or self.server_addr
@@ -56,7 +55,6 @@ def load_nodes(path: Path) -> list[Node]:
                     node.token,
                     node.public_host,
                     node.node_id,
-                    node.tls_ca_file,
                 )
             ):
                 raise ValueError
@@ -76,11 +74,6 @@ def load_nodes(path: Path) -> list[Node]:
                 or start is None
             ):
                 raise ValueError
-            if node.tls_ca_file:
-                ca_file = (path.parent / node.tls_ca_file).resolve()
-                if not ca_file.is_file():
-                    raise ValueError
-                node = replace(node, tls_ca_file=str(ca_file))
             for host in (node.server_addr, node.public_host or node.server_addr):
                 if not host or any(
                     char.isspace() or char in "[]/\\?#" for char in host
@@ -111,6 +104,7 @@ def write_frpc_config(
     lines = [
         f"serverAddr = {quote(node.server_addr, ensure_ascii=False)}",
         f"serverPort = {node.server_port}",
+        'transport.tls.enable = false',
         'log.to = "console"',
         'log.level = "info"',
     ]
@@ -121,14 +115,6 @@ def write_frpc_config(
                 f"auth.token = {quote(node.token, ensure_ascii=False)}",
             ]
         )
-    if claim:
-        lines.append("transport.tls.enable = true")
-        if node.tls_ca_file:
-            lines.append(
-                f"transport.tls.trustedCaFile = {quote(node.tls_ca_file, ensure_ascii=False)}"
-            )
-        else:
-            lines.append("transport.tls.useSystemCa = true")
     proxy_name = claim.proxy_name if claim else f"minecraft-{uuid.uuid4().hex[:12]}"
     lines.extend(
         [

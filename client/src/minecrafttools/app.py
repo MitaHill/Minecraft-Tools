@@ -15,7 +15,6 @@ from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -30,12 +29,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from minecrafttools.config import Node, TunnelClaim, load_nodes, write_frpc_config
+from minecrafttools.config import Node, TunnelClaim, write_frpc_config
 from minecrafttools.control import TunnelControl, control_base
 from minecrafttools.lobby import LobbyTab, room_payload
+from minecrafttools.node_catalog import NODES
 from minecrafttools.styles import STYLE
 
 ANNOUNCEMENTS = QUrl("https://b.clash.ink/archives/mi-ta-shan-lian-ji-gong-ju")
+LEGACY_BLOCK_REASONS = {"no_minecraft_status": "未检测到 Minecraft Java 响应。"}
+
+
+def blocked_message(reason: object) -> str:
+    if not isinstance(reason, str):
+        return "隧道已封禁。"
+    message = LEGACY_BLOCK_REASONS.get(reason, reason).strip()[:200]
+    return f"隧道已封禁。{message}"
 
 
 def client_settings() -> QSettings:
@@ -44,14 +52,13 @@ def client_settings() -> QSettings:
 
     settings = QSettings()
     previous = QSettings("MitaHill", "MinecraftFRP")
-    for key in ("theme", "nodes_file"):
-        if not settings.contains(key) and previous.contains(key):
-            settings.setValue(key, previous.value(key))
+    if not settings.contains("theme") and previous.contains("theme"):
+        settings.setValue("theme", previous.value("theme"))
     return settings
 
 
 class MappingWindow(QWidget):
-    def __init__(self, frpc: Path, nodes_file: Path | None):
+    def __init__(self, frpc: Path, nodes: tuple[Node, ...] = NODES):
         super().__init__()
         self.setWindowTitle("MinecraftTools")
         self.resize(400, 550)
@@ -86,8 +93,6 @@ class MappingWindow(QWidget):
         self.status_timer.timeout.connect(self.poll_tunnel)
 
         self.node = QComboBox()
-        self.load_button = QPushButton("载入节点")
-        self.load_button.clicked.connect(self.choose_nodes)
         self.local_port = QSpinBox()
         self.local_port.setRange(1, 65535)
         self.local_port.setValue(25565)
@@ -96,9 +101,9 @@ class MappingWindow(QWidget):
         self.remote_port.setValue(random.randint(10000, 65534))
         self.node.currentIndexChanged.connect(self.update_remote_ports)
         self.start_button = QPushButton("启动映射")
-        self.start_button.setEnabled(False)
+        self.start_button.setEnabled(bool(nodes))
         self.start_button.clicked.connect(self.toggle_mapping)
-        self.status = QLabel("载入节点配置后即可启动映射。")
+        self.status = QLabel("" if nodes else "此构建没有可用线路。")
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         self.link = QLineEdit()
@@ -114,16 +119,13 @@ class MappingWindow(QWidget):
         self.lobby = LobbyTab(self.control.base)
         self.lobby.publication_status.connect(self.append_log)
         self.tabs.addTab(self.mapping_page(), "映射")
-        self.lobby_index = self.tabs.addTab(self.lobby, "联机大厅")
+        self.tabs.addTab(self.lobby, "联机大厅")
         self.tabs.addTab(self.settings_page(), "设置")
         self.announcements_index = self.tabs.addTab(self.announcements_page(), "线上公告")
-        self.tabs.currentChanged.connect(self.tab_changed)
         QVBoxLayout(self).addWidget(self.tabs)
 
-        if nodes_file is not None:
-            self.open_nodes(nodes_file)
-        elif previous := self.settings.value("nodes_file", "", type=str):
-            self.open_nodes(Path(previous))
+        for node in nodes:
+            self.node.addItem(node.name, node)
 
     def mapping_page(self):
         page = QWidget()
@@ -177,11 +179,6 @@ class MappingWindow(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(15, 15, 15, 15)
-        layout.addWidget(self.load_button)
-        self.node_file_label = QLabel("尚未载入 TOML 节点配置。")
-        self.node_file_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.node_file_label.setWordWrap(True)
-        layout.addWidget(self.node_file_label)
         theme = QComboBox()
         theme.addItems(["自动", "昼间", "夜间"])
         selected = self.settings.value("theme", 0, type=int)
@@ -209,10 +206,6 @@ class MappingWindow(QWidget):
         layout.addStretch()
         return page
 
-    def tab_changed(self, index: int):
-        if index == self.lobby_index:
-            self.lobby.load_once()
-
     def append_log(self, message: str):
         self.mapping_log.appendPlainText(f"{datetime.now():%H:%M:%S}  {message}")
 
@@ -220,26 +213,6 @@ class MappingWindow(QWidget):
         if self.status.text() != message:
             self.status.setText(message)
             self.append_log(message)
-
-    def choose_nodes(self):
-        selected, _ = QFileDialog.getOpenFileName(self, "载入节点", "", "TOML (*.toml)")
-        if selected and self.open_nodes(Path(selected)):
-            self.settings.setValue("nodes_file", selected)
-
-    def open_nodes(self, path: Path):
-        try:
-            nodes = load_nodes(path)
-        except (OSError, UnicodeError, ValueError):
-            self.node_file_label.setText("无法载入这份 TOML，现有节点列表仍可使用。")
-            self.set_status("无法载入节点配置，请检查 TOML 格式和节点字段。")
-            return False
-        self.node.clear()
-        for node in nodes:
-            self.node.addItem(node.name, node)
-        self.start_button.setEnabled(True)
-        self.node_file_label.setText(str(path))
-        self.set_status(f"已载入 {len(nodes)} 个节点。")
-        return True
 
     def update_remote_ports(self):
         node = self.node.currentData()
@@ -331,12 +304,7 @@ class MappingWindow(QWidget):
             if code == 200 and renew:
                 self.renew_at = monotonic() + 25
             if code == 200 and payload.get("status") in ("block_pending", "blocked"):
-                reason = payload.get("reason")
-                if reason == "no_minecraft_status":
-                    reason = "未检测到 Minecraft Java 响应。"
-                self.failure = "隧道已封禁。"
-                if isinstance(reason, str) and reason.strip():
-                    self.failure += reason.strip()[:200]
+                self.failure = blocked_message(payload.get("reason"))
             elif code in (401, 404):
                 self.failure = "隧道注册已失效，请重新启动映射。"
             else:
@@ -346,7 +314,7 @@ class MappingWindow(QWidget):
         self.control.status(claim, renew, finished)
 
     def set_mapping_controls(self, running: bool):
-        for widget in (self.node, self.load_button, self.local_port, self.remote_port):
+        for widget in (self.node, self.local_port, self.remote_port):
             widget.setEnabled(not running)
         self.public_room.setEnabled(not running and bool(self.lobby.api))
         self.start_button.setText("停止映射" if running else "启动映射")
@@ -452,7 +420,6 @@ def send_launcher_ready(port: str, token: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--nodes", type=Path)
     parser.add_argument("--frpc", type=Path)
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     options = parser.parse_args()
@@ -470,10 +437,12 @@ def main() -> int:
     if options.smoke_test:
         if artwork.isNull() or not frpc.is_file():
             return 1
+        if getattr(sys, "frozen", False) and not NODES:
+            return 1
         result = subprocess.run([str(frpc), "--version"], timeout=10, check=False)
         if result.returncode:
             return result.returncode
-    window = MappingWindow(frpc, options.nodes)
+    window = MappingWindow(frpc)
     if options.smoke_test:
         window.show()
 
