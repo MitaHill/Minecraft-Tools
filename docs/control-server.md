@@ -755,7 +755,7 @@ ops = ["Login", "NewProxy", "CloseProxy", "NewUserConn"]
 | 环境 | 用途 | 数据与入口 |
 | --- | --- | --- |
 | 本地工作区 | 开发与第一轮验收 | 用临时 SQLite、Launcher 安装状态和 FRP 测试配置，先验证新库和已有库迁移，再运行接口、桌面和容器测试。 |
-| Phoenix | Control Server 联调 | Compose 项目 `minecrafttools-integration`，应用目录 `/srv/minecrafttools-integration/tls-node-trial/control`，SQLite 卷 `minecrafttools-integration_control-data`。HTTPS 入口为 `https://ctl.mctools.mitahill.com`，发布目录为 `/srv/minecrafttools-integration/tls-node-trial/releases`。 |
+| Phoenix | Control Server 联调 | Compose 项目 `minecrafttools-integration`，应用目录 `/opt/minecraft-tools/control-server`，SQLite 卷 `minecrafttools-integration_control-data`。HTTPS 入口为 `https://ctl.mctools.mitahill.com`，发布目录为 `/srv/minecrafttools-integration/tls-node-trial/releases`。部署按 [Phoenix 部署 SOP](../deploy/control-server/README.md) 手工执行。 |
 | 香港节点（伤心云 Lite-Lv1） | FRP Agent 与公网隧道联调 | 使用独立的 Compose 项目、bridge、封禁状态卷和一段经盘点确认空闲的测试端口。agent 通过 `tls://us-6.mitahill.com:19443` 主动连到 Phoenix。 |
 | 香港 dev 线路 | 开发通道的内置线路 | Compose 项目 `minecrafttools-hk-dev`，节点 ID 为 `hk-dev`。Agent 连接 `https://ctl.mctools.mitahill.com:443`。frps 接收 `hk-1.mitahill.com:27002` 的普通 TCP 连接，Phoenix 大厅允许 `33001–33002` 两个游戏端口。 |
 

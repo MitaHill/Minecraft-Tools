@@ -84,6 +84,12 @@ kindmitaishere/minecrafttools-frp-agent:2026-11-25-1
 
 每个镜像都包含 `linux/amd64` 与 `linux/arm64`，推送后用 `docker buildx imagetools inspect` 校验两个平台。`main` 分支和 `control/**`、`node/**` 的 PR 只做单平台构建，不推送，用来提前发现 Dockerfile 破损。正式版 Git 标签 `yyyy-mm-dd-n` 直接用作镜像标签。dev 的 Git 标签 `dev-yyyy-mm-dd-n` 去掉 `dev-` 后用作镜像标签。两个通道共享当天的发布序号，避免不同构建占用同一个镜像标签。
 
+### 部署
+
+镜像发布不等于上线。Control Server 的部署是手工 SOP，工作流不连接 Phoenix：compose 目录固定在
+`/opt/minecraft-tools/control-server/`，用 `deploy.sh <tag>` 切换镜像，健康检查失败自动退回上一版。
+步骤、验证和回滚见 [Phoenix 部署 SOP](../deploy/control-server/README.md)。
+
 ### dev-2026-11-26-1 发布记录
 
 2026-11-26 把新版工作流及配套变更推到 `origin/main`，分支构建和 `dev-2026-11-26-1` 标签构建全部通过。本次推送的提交：
@@ -105,7 +111,7 @@ kindmitaishere/minecrafttools-frp-agent:2026-11-25-1
 
 验收结果：
 
-- Phoenix 原来运行的是本地构建的 `agent-https-20261126`，有 WebSocket 入口但没有按通道的发布文件路由。已改为拉取发布镜像 `2026-11-26-1` 并重建 `control`：`docker compose -p minecrafttools-integration --env-file deploy.env -f compose.yaml -f compose.node-hub.yaml -f node-https.yaml -f releases.yaml -f ../public-control.yaml up -d --no-build control`。`node-https.yaml` 现在固定引用发布镜像，旧内容备份为 `node-https.yaml.bak-<时间戳>`。重建后 `/api/v1/node/connect` 收到香港 dev Agent 的 WebSocket 连接，`hk-dev` 与 `hk-integration` 均为 `online`。
+- Phoenix 原来运行的是本地构建的 `agent-https-20261126`，有 WebSocket 入口但没有按通道的发布文件路由。已改为拉取发布镜像 `2026-11-26-1` 并重建 `control`：`docker compose -p minecrafttools-integration --env-file deploy.env -f compose.yaml -f compose.node-hub.yaml -f node-https.yaml -f releases.yaml -f ../public-control.yaml up -d --no-build control`。`node-https.yaml` 现在固定引用发布镜像，旧内容备份为 `node-https.yaml.bak-<时间戳>`。该命令当时在旧目录执行；2026-11-26 起 compose 目录迁到 `/opt/minecraft-tools/control-server/`，部署改为手工 SOP，见 [Phoenix 部署](../deploy/control-server/README.md)。重建后 `/api/v1/node/connect` 收到香港 dev Agent 的 WebSocket 连接，`hk-dev` 与 `hk-integration` 均为 `online`。
 - `/releases/dev.json` 与预发布里的 `dev.json` 逐字节一致，六个更新包的地址都指向 `https://ctl.mctools.mitahill.com/releases/artifacts/dev/`，版本为 `2026-11-26-1`。
 - Phoenix 的 `dev/artifacts/` 有 18 个文件，与 GitHub `SHA256SUMS` 全部一致，没有旧版本残留。从清单实际下载 Windows AMD64（55,020,716 字节）和 macOS ARM64（40,101,176 字节）更新包，大小与 SHA-256 均匹配。
 - 预发布的 Windows AMD64 MSI 和 macOS ARM64 DMG 与 `SHA256SUMS` 一致；DMG 挂载后应用包深度签名校验通过。解压 macOS ARM64 更新包运行 `--smoke-test` 返回 0，说明发布包的冻结目录里已有可用节点。

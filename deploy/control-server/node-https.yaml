@@ -1,0 +1,5 @@
+services:
+  control:
+    image: kindmitaishere/minecrafttools-control:${CONTROL_IMAGE_TAG:?set CONTROL_IMAGE_TAG}
+    environment:
+      CONTROL_NODE_HUB_HTTPS: "1"

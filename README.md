@@ -20,6 +20,8 @@
 
 `control/` 是新的 Control Server。Launcher 启动、旧大厅、管理台和节点封禁已通过本地与公网联调。见[本地联调说明](control/README.md)和[分阶段实施](docs/control-server.md#13-分阶段实施)。
 
+`deploy/control-server/` 是 Phoenix 上 Control Server 的 compose 文件和部署 SOP。镜像由 CI 构建推送，上线按 SOP 手工执行。
+
 ## 下一阶段
 
 客户端由主体程序和独立的 Launcher 组成，两者打进同一个安装包。Launcher 先检查网络和总控制端，再检查更新。`dev` 优先更新 dev，也可在没有更新的 dev 版本时安装更高版本的 stable。有更新就当次下载安装，随后启动主体程序。主体程序须在 30 秒内报告就绪，启动失败时保存诊断并自动上报。断网或总控制端连通测试失败时，Launcher 报错退出，不上传日志。这部分已经实现并纳入 CI：标签构建产出 MSI、DMG、`.run` 和更新包，并从安装入口冒烟。

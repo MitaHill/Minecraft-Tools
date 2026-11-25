@@ -1,0 +1,4 @@
+services:
+  control:
+    volumes:
+      - ${TRIAL_DIR:?set TRIAL_DIR}/admin:/run/minecrafttools-admin:ro
