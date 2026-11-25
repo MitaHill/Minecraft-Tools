@@ -30,6 +30,8 @@ SCANNABLE = ("pending", "active", "offline")
 MAX_PER_NODE = 4
 MAX_PER_ROUND = 16
 KEEP_SCANS_PER_TUNNEL = 32
+# 返回给客户端展示的封禁文案；后续按触发条件补充各自的文案。
+AUTO_BLOCK_MESSAGE = "测试"
 
 scans = Table(
     "tunnel_scans",
@@ -178,7 +180,7 @@ def record_scan(
                 database,
                 target["id"],
                 "block",
-                "no_minecraft_status",
+                AUTO_BLOCK_MESSAGE,
                 "scanner",
                 expected_run_id=target["run_id"],
                 expected_port=target["remote_port"],

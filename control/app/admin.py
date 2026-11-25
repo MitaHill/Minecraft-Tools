@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 from sqlalchemy import Column, Float, String, Table, delete, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .database import metadata
+from .database import metadata, record_admin_action
 from .rate_limit import RateLimit
 from .registry import nodes, tunnels
 from .scanner import SCANNABLE, scans
@@ -163,6 +163,7 @@ def login(payload: Login, request: Request, response: Response):
                 expires_at=now + SESSION_AGE,
             )
         )
+        record_admin_action(connection, account.username, "login", account.username)
     response.set_cookie(
         SESSION_COOKIE,
         token,
@@ -186,9 +187,13 @@ def session(account: SignedIn, response: Response):
 def logout(request: Request, response: Response):
     if token := request.cookies.get(SESSION_COOKIE):
         with request.app.state.database.begin() as connection:
-            connection.execute(
-                delete(sessions).where(sessions.c.token_hash == token_digest(token))
-            )
+            username = connection.execute(
+                delete(sessions)
+                .where(sessions.c.token_hash == token_digest(token))
+                .returning(sessions.c.username)
+            ).scalar_one_or_none()
+            if username is not None:
+                record_admin_action(connection, username, "logout", username)
     response.delete_cookie(SESSION_COOKIE, path="/api/admin")
 
 
@@ -216,6 +221,7 @@ def register_node(
     with request.app.state.database.begin() as connection:
         if connection.execute(statement).rowcount != 1:
             raise HTTPException(409, "Node already exists")
+        record_admin_action(connection, account.username, "node.register", payload.id)
     response.headers["Cache-Control"] = "no-store"
     return {"id": payload.id, "secret": token}
 
@@ -288,7 +294,7 @@ def list_scans(
 @router.post(
     "/tunnels/{tunnel_id}/rescan", status_code=202, dependencies=[Depends(same_origin)]
 )
-def rescan_tunnel(tunnel_id: str, request: Request, _account: Operator):
+def rescan_tunnel(tunnel_id: str, request: Request, account: Operator):
     if not request.app.state.scanner_enabled:
         raise HTTPException(409, "Scanner is disabled")
     with request.app.state.database.begin() as connection:
@@ -305,4 +311,5 @@ def rescan_tunnel(tunnel_id: str, request: Request, _account: Operator):
             if exists is None:
                 raise HTTPException(404, "Tunnel not found")
             raise HTTPException(409, "Tunnel is not eligible for scanning")
+        record_admin_action(connection, account.username, "tunnel.rescan", tunnel_id)
     return {"status": "scheduled"}

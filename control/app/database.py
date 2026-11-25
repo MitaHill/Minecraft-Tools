@@ -1,4 +1,5 @@
 from pathlib import Path
+from time import time
 
 from alembic import command
 from alembic.config import Config
@@ -7,6 +8,7 @@ from sqlalchemy import (
     URL,
     Column,
     DateTime,
+    Float,
     Integer,
     MetaData,
     String,
@@ -15,7 +17,7 @@ from sqlalchemy import (
     event,
     func,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 metadata = MetaData()
 diagnostics = Table(
@@ -29,6 +31,28 @@ diagnostics = Table(
     Column("arch", String, nullable=False),
     Column("report", JSON, nullable=False),
 )
+audit_logs = Table(
+    "audit_logs",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("created_at", Float, nullable=False),
+    Column("actor", String, nullable=False),
+    Column("action", String, nullable=False),
+    Column("target", String, nullable=False),
+)
+
+
+def record_admin_action(
+    connection: Connection, actor: str, action: str, target: str
+) -> None:
+    connection.execute(
+        audit_logs.insert().values(
+            created_at=time(),
+            actor=actor,
+            action=action,
+            target=target,
+        )
+    )
 
 
 def open_database(data_dir: Path) -> Engine:

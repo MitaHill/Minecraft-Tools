@@ -8,9 +8,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.client_api import digest
+from app.java_probe import Status
 from app.main import app
 from app.node_hub import NodeHub, Proxy
 from app.registry import installs, nodes, tunnel_claims, tunnels
+from app.scanner import ScanPolicy, record_scan
 from app.tunnel_commands import acknowledge_command, enqueue_command, next_command
 
 
@@ -139,6 +141,50 @@ class ClientTunnelTests(unittest.TestCase):
         acknowledge_command(self.db, self.node["id"], unblock["command_id"], True, "")
         self.assertEqual(self.reserve(self.other).status_code, 201)
         self.assertEqual(self.http.get(status, headers=self.owner).status_code, 404)
+
+    def test_scanner_block_returns_custom_message_to_client(self):
+        claim = self.reserve(self.owner).json()
+        self.hub.record_snapshot(
+            self.node,
+            [
+                Proxy(
+                    run_id="run-scan",
+                    proxy_name=claim["proxy_name"],
+                    remote_port=30001,
+                    claim_id=claim["id"],
+                    claim_hash=digest(claim["proof"]),
+                )
+            ],
+        )
+        with self.db.connect() as connection:
+            tunnel = (
+                connection.execute(
+                    select(tunnels).where(tunnels.c.node_id == self.node["id"])
+                )
+                .mappings()
+                .one()
+            )
+        now = time()
+        record_scan(
+            self.db,
+            {
+                "id": tunnel["id"],
+                "run_id": tunnel["run_id"],
+                "remote_port": tunnel["remote_port"],
+            },
+            Status("not_minecraft"),
+            ScanPolicy(grace=0, failures=1),
+            now,
+            True,
+        )
+        response = self.http.get(
+            f"/api/v1/tunnels/{claim['id']}/status", headers=self.owner
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            (response.json()["status"], response.json()["reason"]),
+            ("block_pending", "测试"),
+        )
 
     def test_expired_claim_can_be_replaced_but_cannot_be_renewed(self):
         old = self.reserve(self.owner).json()

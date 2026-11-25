@@ -14,7 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Engine
 
-from .database import metadata
+from .database import metadata, record_admin_action
 from .lobby import canonical_host, rooms
 from .registry import blocks, nodes, tunnels
 
@@ -160,6 +160,10 @@ def enqueue_command(
                 next_attempt_at=now,
             )
         ).inserted_primary_key[0]
+        if source.startswith("admin:"):
+            record_admin_action(
+                connection, source.removeprefix("admin:"), f"tunnel.{action}", tunnel_id
+            )
         return {"command_id": command_id, "status": "pending"}
 
 

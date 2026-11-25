@@ -313,5 +313,5 @@ class MigrationTests(unittest.TestCase):
                     report = connection.exec_driver_sql(
                         "SELECT report FROM diagnostics"
                     ).scalar_one()
-                self.assertEqual(revision, "0006_install_claims")
+                self.assertEqual(revision, "0007_admin_audit")
                 self.assertEqual(json.loads(report), {"stage": "ready"})
