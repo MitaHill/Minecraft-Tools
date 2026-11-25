@@ -316,6 +316,7 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 	connection, err := newControlConnection(os.Getenv("CONTROL_URL"), os.Getenv("CONTROL_CA_FILE"),
+		os.Getenv("CONTROL_CLIENT_CERT_FILE"), os.Getenv("CONTROL_CLIENT_KEY_FILE"),
 		os.Getenv("NODE_ID"), secret, envOr("FRPS_VERSION", "0.72.0"))
 	if err != nil {
 		return err

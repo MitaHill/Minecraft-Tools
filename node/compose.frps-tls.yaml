@@ -1,4 +1,0 @@
-services:
-  frps:
-    volumes:
-      - ${FRPS_TLS_DIRECTORY:?set FRPS_TLS_DIRECTORY}:/run/frps-tls:ro

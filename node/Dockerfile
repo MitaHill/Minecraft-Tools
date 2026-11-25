@@ -1,6 +1,6 @@
 FROM golang:1.26-bookworm AS build
 WORKDIR /node
-COPY go.mod *.go ./
+COPY go.mod go.sum *.go ./
 RUN CGO_ENABLED=0 go build -trimpath -o /frp-agent .
 
 FROM fatedier/frps:v0.72.0 AS upstream-frps

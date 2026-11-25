@@ -47,7 +47,9 @@ services:
     security_opt: ["no-new-privileges:true"]
     environment:
       CONTROL_URL: ${CONTROL_URL:?set CONTROL_URL}
-      CONTROL_CA_FILE: /run/node-secrets/control-ca.pem
+      CONTROL_CA_FILE: ${CONTROL_CA_FILE-/run/node-secrets/control-ca.pem}
+      CONTROL_CLIENT_CERT_FILE: ${CONTROL_CLIENT_CERT_FILE:-}
+      CONTROL_CLIENT_KEY_FILE: ${CONTROL_CLIENT_KEY_FILE:-}
       NODE_ID: ${NODE_ID:?set NODE_ID}
       NODE_SECRET_FILE: /run/node-secrets/node-secret
       NODE_PORT_START: ${NODE_PORT_START:-30000}

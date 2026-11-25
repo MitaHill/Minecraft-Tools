@@ -11,23 +11,30 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 type ControlConnection struct {
-	address string
-	tls     *tls.Config
-	hello   map[string]any
+	address  string
+	endpoint string
+	tls      *tls.Config
+	hello    map[string]any
 }
 
-func newControlConnection(address, caFile, nodeID, secret, frpsVersion string) (*ControlConnection, error) {
+func newControlConnection(address, caFile, certFile, keyFile, nodeID, secret, frpsVersion string) (*ControlConnection, error) {
 	parsed, err := url.Parse(address)
-	if err != nil || parsed.Scheme != "tls" || parsed.Hostname() == "" || parsed.Port() == "" ||
-		parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, errors.New("CONTROL_URL must be tls://hostname:port")
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.ForceQuery ||
+		parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Scheme == "tls" && (parsed.Port() == "" || parsed.Path != "")) ||
+		(parsed.Scheme == "https" && parsed.Path != "" && parsed.Path != "/") ||
+		(parsed.Scheme != "tls" && parsed.Scheme != "https") {
+		return nil, errors.New("CONTROL_URL must be https://hostname[:port] or tls://hostname:port")
 	}
 	if nodeID == "" || secret == "" {
 		return nil, errors.New("NODE_ID and a node secret are required")
@@ -44,7 +51,28 @@ func newControlConnection(address, caFile, nodeID, secret, frpsVersion string) (
 		}
 		config.RootCAs = certs
 	}
-	return &ControlConnection{address: parsed.Host, tls: config, hello: map[string]any{
+	if (certFile == "") != (keyFile == "") {
+		return nil, errors.New("CONTROL_CLIENT_CERT_FILE and CONTROL_CLIENT_KEY_FILE must be set together")
+	}
+	if certFile != "" {
+		if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+			return nil, fmt.Errorf("load node client certificate: %w", err)
+		}
+		config.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				return nil, fmt.Errorf("reload node client certificate: %w", err)
+			}
+			return &certificate, nil
+		}
+	}
+	endpoint := ""
+	if parsed.Scheme == "https" {
+		parsed.Scheme = "wss"
+		parsed.Path = "/api/v1/node/connect"
+		endpoint = parsed.String()
+	}
+	return &ControlConnection{address: parsed.Host, endpoint: endpoint, tls: config, hello: map[string]any{
 		"protocol_version": 1, "node_id": nodeID, "secret": secret,
 		"agent_version": version, "frps_version": frpsVersion,
 	}}, nil
@@ -93,9 +121,28 @@ func (session *ControlSession) send(kind string, payload any) (ControlReply, err
 	return response, nil
 }
 
+func (control *ControlConnection) dial(ctx context.Context) (net.Conn, error) {
+	if control.endpoint == "" {
+		dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: 6 * time.Second}, Config: control.tls}
+		return dialer.DialContext(ctx, "tcp", control.address)
+	}
+	upgrade, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	client := &http.Client{
+		Transport:     &http.Transport{TLSClientConfig: control.tls},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	socket, _, err := websocket.Dial(upgrade, control.endpoint, &websocket.DialOptions{HTTPClient: client})
+	if err != nil {
+		return nil, err
+	}
+	connection := websocket.NetConn(ctx, socket, websocket.MessageText)
+	socket.SetReadLimit(maxMessageSize)
+	return connection, nil
+}
+
 func (control *ControlConnection) session(ctx context.Context, snapshot func(context.Context) ([]Proxy, error), execute func(context.Context, FirewallRequest) error) error {
-	dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: 6 * time.Second}, Config: control.tls}
-	connection, err := dialer.DialContext(ctx, "tcp", control.address)
+	connection, err := control.dial(ctx)
 	if err != nil {
 		return err
 	}
