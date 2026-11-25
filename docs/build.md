@@ -84,22 +84,33 @@ kindmitaishere/minecrafttools-frp-agent:2026-11-25-1
 
 每个镜像都包含 `linux/amd64` 与 `linux/arm64`，推送后用 `docker buildx imagetools inspect` 校验两个平台。`main` 分支和 `control/**`、`node/**` 的 PR 只做单平台构建，不推送，用来提前发现 Dockerfile 破损。正式版 Git 标签 `yyyy-mm-dd-n` 直接用作镜像标签。dev 的 Git 标签 `dev-yyyy-mm-dd-n` 去掉 `dev-` 后用作镜像标签。两个通道共享当天的发布序号，避免不同构建占用同一个镜像标签。
 
-### 新工作流推送与构建交接（2026-11-26）
+### dev-2026-11-26-1 发布记录
 
-待接手人推送新版 `.github/workflows/client.yml` 并在远程触发新一轮构建。当前远程 `main` 为 `8b81b22`。已触发的桌面 CI 和容器 CI 都使用该提交。关联的本地变更还包括支持 `--nodes-file` 的 `client/scripts/build.py` 和客户端节点目录实现。新版清单引用 Phoenix 下载地址，Control Server 因此也需要包含 `control/app/main.py` 的发布文件路由及配套测试。提交前核对这些依赖所在的改动，并排除本地节点配置和凭据。[旧版桌面 CI](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45674522427) · [旧版容器 CI](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45674524187)
+2026-11-26 把新版工作流及配套变更推到 `origin/main`，分支构建和 `dev-2026-11-26-1` 标签构建全部通过。本次推送的提交：
 
-1. 将新版工作流及配套变更推到 `origin/main`。推送会触发 `Client build` 和 `Container images`。如需手动触发新的分支构建，使用下列命令。核对两个运行的 `headSha` 都是刚推送的提交，并检查六平台桌面作业、Control Server 和 FRP Agent 测试、lint 及两个容器镜像构建。分支构建将 Main App 和 Launcher 分开上传到 GitHub Actions。
+| 提交 | 内容 |
+| --- | --- |
+| `8566340` | 桌面端内置节点目录，`build.py --nodes-file` |
+| `e96a414` | 管理操作审计、封禁文案原样下发 |
+| `da75547` | HTTPS 节点接入、按通道提供发布文件 |
+| `1aeffc9` | FRP Agent 用 HTTPS WebSocket 连接节点 Hub |
+| `dd0d60d` | 新版工作流与文档 |
+| `832fc5e` | 修复 macOS runner 上 bash 3.2 的空数组展开 |
 
-   ```sh
-   gh workflow run client.yml --repo MitaHill/Minecraft-Tools --ref main
-   gh workflow run images.yml --repo MitaHill/Minecraft-Tools --ref main
-   ```
+`dd0d60d` 的第一次分支构建在 darwin 上失败：`build` 作业用空数组承载可选参数，而 macOS 仍是 bash 3.2，`"${arr[@]}"` 在 `set -u` 下直接退出。`832fc5e` 改为把命令本身放进数组后重跑，六个平台通过。运行记录：
 
-2. 需要一体安装包和 Phoenix 上传时，在新的已验证提交上推送下一个未使用的 `dev-yyyy-mm-dd-n` 标签。先确认 `dev` 环境已有 `MINECRAFTTOOLS_NODES_TOML`，签名和 SSH 发布配置可用，且 Phoenix 上的 Control Server 支持 `/releases/artifacts/dev/<文件名>` 并挂载 CI 使用的发布目录。标签推送会生成 GitHub 预发布、推送双架构镜像，并在启用 `MINECRAFTTOOLS_PUBLISH_MANIFEST` 时通过 SSH/SFTP 更新 Phoenix 的 dev 通道。
-3. 确认六个安装作业都通过安装、从 Launcher 启动和 Main App `READY` 检查，且 `release` 与 `deploy-release` 成功。从同一 GitHub 预发布下载 Windows AMD64 的 `MinecraftTools-<版本>-windows-amd64.msi` 和 macOS ARM64 的 `MinecraftTools-<版本>-darwin-arm64.dmg`，按 `SHA256SUMS` 校验。每个安装包都包含 Launcher 和 Main App。
-4. 核对 Phoenix 的 `dev/artifacts/` 收到 18 个发布文件，`/releases/dev.json` 指向本次版本，并从清单中实际下载 Windows AMD64 与 macOS ARM64 的更新包，核对大小和 SHA-256。把新提交、相关 Actions 运行链接、预发布链接和验收结果回填到这段交接记录。
+- 分支构建：[Client build 45678710138](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45678710138)（`832fc5e`，四组件测试、lint、六平台打包、Launcher 测试全通过）、[Container images 45678710080](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45678710080)。
+- 标签构建：[Client build 45680547451](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45680547451)、[Container images 45680547426](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45680547426)，都使用 `832fc5e`。六个安装作业通过安装、从 Launcher 启动和 Main App `READY` 检查，`release` 与 `deploy-release` 成功。`release-nodes` 取 `dev` 环境的 `MINECRAFTTOOLS_NODES_TOML`，与运行产物的 SHA-256 一致。
+- 预发布：[dev-2026-11-26-1](https://github.com/MitaHill/Minecraft-Tools/releases/tag/dev-2026-11-26-1)，20 个资产：6 个桌面压缩包、6 个更新包、6 个安装包、`dev.json` 和 `SHA256SUMS`。镜像 `kindmitaishere/minecrafttools-control:2026-11-26-1` 与 `kindmitaishere/minecrafttools-frp-agent:2026-11-26-1` 的 `linux/amd64`、`linux/arm64` 校验通过。
 
-当前 Control Server 的文件名校验会拒绝两个 Linux 桌面 `.tar.gz`。它们会随发布上传，也可以从 GitHub 预发布下载。若要让这两个压缩包也能从 Phoenix 下载，需先补齐发布文件路由的文件名规则和测试。
+验收结果：
+
+- Phoenix 原来运行的是本地构建的 `agent-https-20261126`，有 WebSocket 入口但没有按通道的发布文件路由。已改为拉取发布镜像 `2026-11-26-1` 并重建 `control`：`docker compose -p minecrafttools-integration --env-file deploy.env -f compose.yaml -f compose.node-hub.yaml -f node-https.yaml -f releases.yaml -f ../public-control.yaml up -d --no-build control`。`node-https.yaml` 现在固定引用发布镜像，旧内容备份为 `node-https.yaml.bak-<时间戳>`。重建后 `/api/v1/node/connect` 收到香港 dev Agent 的 WebSocket 连接，`hk-dev` 与 `hk-integration` 均为 `online`。
+- `/releases/dev.json` 与预发布里的 `dev.json` 逐字节一致，六个更新包的地址都指向 `https://ctl.mctools.mitahill.com/releases/artifacts/dev/`，版本为 `2026-11-26-1`。
+- Phoenix 的 `dev/artifacts/` 有 18 个文件，与 GitHub `SHA256SUMS` 全部一致，没有旧版本残留。从清单实际下载 Windows AMD64（55,020,716 字节）和 macOS ARM64（40,101,176 字节）更新包，大小与 SHA-256 均匹配。
+- 预发布的 Windows AMD64 MSI 和 macOS ARM64 DMG 与 `SHA256SUMS` 一致；DMG 挂载后应用包深度签名校验通过。解压 macOS ARM64 更新包运行 `--smoke-test` 返回 0，说明发布包的冻结目录里已有可用节点。
+
+当前 Control Server 的文件名校验会拒绝两个 Linux 桌面 `.tar.gz`（本轮实测这两个地址返回 404，安装包本身已上传，可从 GitHub 预发布下载）。若要让这两个压缩包也能从 Phoenix 下载，需先补齐发布文件路由的文件名规则和测试。
 
 ## 大厅服务和管理工具
 
