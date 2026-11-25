@@ -147,7 +147,7 @@ jobs:
       - if: matrix.system == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libfontconfig1-dev pkg-config
       - run: uv sync --project client --locked --extra build
       - run: uv run --project client --no-sync python -m unittest discover -s client/tests -v
       - name: Test Launcher installation and rollback
