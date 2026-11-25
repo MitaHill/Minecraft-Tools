@@ -5,19 +5,26 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from minecraftfrp.config import load_nodes, write_frpc_config
-
+from minecrafttools.config import load_nodes, write_frpc_config
 
 CLIENT = Path(__file__).resolve().parents[1]
-NAME = "MinecraftFRP"
+NAME = "MinecraftTools"
+
+
+def output_dirs() -> tuple[Path, Path]:
+    """产物和工作目录默认在 client/ 下；设置环境变量后写到项目目录以外。"""
+    dist = Path(os.environ.get("MINECRAFTTOOLS_DIST_DIR", CLIENT / "dist"))
+    work = Path(os.environ.get("MINECRAFTTOOLS_WORK_DIR", CLIENT / "build" / "pyinstaller"))
+    return dist, work
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build and validate a native MinecraftFRP archive.")
+    parser = argparse.ArgumentParser(description="Build and validate a native MinecraftTools archive.")
     parser.add_argument("--frpc", type=Path, required=True)
     parser.add_argument("--version", required=True)
     args = parser.parse_args()
@@ -34,24 +41,24 @@ def main():
     if system not in {"windows", "darwin", "linux"}:
         parser.error(f"system is unsupported: {system}")
     frpc = args.frpc.resolve()
-    dist = CLIENT / "dist"
-    work = CLIENT / "build" / "pyinstaller"
-    source = CLIENT / "src" / "minecraftfrp"
+    dist, work = output_dirs()
+    work.mkdir(parents=True, exist_ok=True)
+    source = CLIENT / "src" / "minecrafttools"
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean", "--onedir", "--name", NAME,
         "--distpath", str(dist), "--workpath", str(work), "--specpath", str(work),
-        "--add-binary", f"{frpc}:minecraftfrp/bin",
-        "--add-data", f"{frpc.with_name('frp-LICENSE')}:minecraftfrp",
-        "--add-data", f"{source / 'logo.ico'}:minecraftfrp",
-        "--add-data", f"{source / 'MinecraftToolsStartupLogo.png'}:minecraftfrp",
+        "--add-binary", f"{frpc}:minecrafttools/bin",
+        "--add-data", f"{frpc.with_name('frp-LICENSE')}:minecrafttools",
+        "--add-data", f"{source / 'logo.ico'}:minecrafttools",
+        "--add-data", f"{source / 'MinecraftToolsStartupLogo.png'}:minecrafttools",
     ]
     if system in {"windows", "darwin"}:
         cmd.append("--windowed")
     if system == "windows":
         cmd.extend(["--icon", str(source / "logo.ico")])
     if system == "darwin":
-        cmd.extend(["--osx-bundle-identifier", "com.mitahill.minecraftfrp"])
+        cmd.extend(["--osx-bundle-identifier", "com.mitahill.minecrafttools"])
     cmd.append(str(source / "__main__.py"))
     subprocess.run(cmd, check=True, cwd=CLIENT)
 
@@ -78,6 +85,9 @@ def main():
         )
     else:
         shutil.make_archive(str(base), "zip" if system == "windows" else "gztar", root_dir=dist, base_dir=bundle.name)
+    update_name = archives / f"{NAME}-update-{args.version}-{system}-{arch}.tar.gz"
+    with tarfile.open(update_name, "w:gz", format=tarfile.GNU_FORMAT, compresslevel=4) as archive:
+        archive.add(bundle, arcname=bundle.name)
 
 
 if __name__ == "__main__":

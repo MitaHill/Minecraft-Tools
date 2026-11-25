@@ -5,6 +5,7 @@ QWidget{background:#f8f9fa;font-size:14px;color:#000;}
 QLabel{color:#495057;margin-bottom:8px;}
 QPushButton{background:#4CAF50;color:#fff;padding:8px 16px;border:none;border-radius:4px;}
 QPushButton:hover{background:#45a049;}
+QPushButton:disabled{background:#e5e7eb;color:#626b76;}
 QLineEdit,QTextEdit,QSpinBox{background:#fff;border:1px solid #dee2e6;padding:8px;border-radius:4px;color:#000;selection-background-color:#0078d7;selection-color:#fff;}
 QComboBox{
     min-width:150px;
@@ -117,6 +118,7 @@ QWidget{background:#1e1e1e;font-size:14px;color:#e0e0e0;}
 QLabel{color:#b3b3b3;}
 QPushButton{background:#333;color:#fff;padding:8px 16px;border:none;border-radius:4px;}
 QPushButton:hover{background:#454545;}
+QPushButton:disabled{background:#242424;color:#919191;}
 QLineEdit,QTextEdit,QSpinBox{background:#2d2d2d;border:1px solid #404040;padding:8px;border-radius:4px;color:#e0e0e0;}
 QComboBox{min-width:150px;background-color:#2d2d2d;color:#e0e0e0;border:1px solid #404040;border-radius:4px;padding:4px;}
 QComboBox:on{border:1px solid #4CAF50;}

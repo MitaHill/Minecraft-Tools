@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "minecraftfrp"
+name = "minecrafttools"
 version = "0.0.0"
 requires-python = ">=3.15,<3.16"
 dependencies = ["PySide6-Essentials==6.12.0"]
@@ -12,4 +12,4 @@ dependencies = ["PySide6-Essentials==6.12.0"]
 build = ["PyInstaller==6.22.3"]
 
 [tool.setuptools.package-data]
-minecraftfrp = ["logo.ico", "MinecraftToolsStartupLogo.png"]
+minecrafttools = ["logo.ico", "MinecraftToolsStartupLogo.png"]

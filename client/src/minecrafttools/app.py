@@ -1,10 +1,14 @@
 import argparse
+import logging
+import os
 import random
+import socket
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 
 from PySide6.QtCore import QProcess, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QPixmap
@@ -19,33 +23,51 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
-    QSplashScreen,
     QSpinBox,
+    QSplashScreen,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from minecraftfrp.config import load_nodes, write_frpc_config
-from minecraftfrp.lobby import LobbyTab, room_payload
-from minecraftfrp.styles import STYLE
-
+from minecrafttools.config import Node, TunnelClaim, load_nodes, write_frpc_config
+from minecrafttools.control import TunnelControl, control_base
+from minecrafttools.lobby import LobbyTab, room_payload
+from minecrafttools.styles import STYLE
 
 ANNOUNCEMENTS = QUrl("https://b.clash.ink/archives/mi-ta-shan-lian-ji-gong-ju")
+
+
+def client_settings() -> QSettings:
+    if data_root := os.environ.get("MINECRAFTTOOLS_DATA_ROOT"):
+        return QSettings(str(Path(data_root) / "settings.ini"), QSettings.Format.IniFormat)
+
+    settings = QSettings()
+    previous = QSettings("MitaHill", "MinecraftFRP")
+    for key in ("theme", "nodes_file"):
+        if not settings.contains(key) and previous.contains(key):
+            settings.setValue(key, previous.value(key))
+    return settings
 
 
 class MappingWindow(QWidget):
     def __init__(self, frpc: Path, nodes_file: Path | None):
         super().__init__()
-        self.setWindowTitle("Minecraft 端口映射工具")
+        self.setWindowTitle("MinecraftTools")
         self.resize(400, 550)
         self.frpc = frpc
-        self.settings = QSettings()
+        self.settings = client_settings()
         self.config_dir: TemporaryDirectory | None = None
         self.output = bytearray()
         self.failure = ""
         self.address = ""
         self.stopping = False
+        self.registering = False
+        self.closing = False
+        self.claim: TunnelClaim | None = None
+        self.status_pending = False
+        self.renew_at = 0.0
+        self.control = TunnelControl(self, control_base())
 
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -59,6 +81,9 @@ class MappingWindow(QWidget):
         self.stop_timeout = QTimer(self)
         self.stop_timeout.setSingleShot(True)
         self.stop_timeout.timeout.connect(self.process.kill)
+        self.status_timer = QTimer(self)
+        self.status_timer.setInterval(5000)
+        self.status_timer.timeout.connect(self.poll_tunnel)
 
         self.node = QComboBox()
         self.load_button = QPushButton("载入节点")
@@ -69,10 +94,12 @@ class MappingWindow(QWidget):
         self.remote_port = QSpinBox()
         self.remote_port.setRange(1, 65535)
         self.remote_port.setValue(random.randint(10000, 65534))
+        self.node.currentIndexChanged.connect(self.update_remote_ports)
         self.start_button = QPushButton("启动映射")
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.toggle_mapping)
         self.status = QLabel("载入节点配置后即可启动映射。")
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         self.link = QLineEdit()
         self.link.setReadOnly(True)
@@ -84,7 +111,7 @@ class MappingWindow(QWidget):
         self.mapping_log.setReadOnly(True)
         self.mapping_log.setMaximumBlockCount(80)
         self.tabs = QTabWidget()
-        self.lobby = LobbyTab()
+        self.lobby = LobbyTab(self.control.base)
         self.lobby.publication_status.connect(self.append_log)
         self.tabs.addTab(self.mapping_page(), "映射")
         self.lobby_index = self.tabs.addTab(self.lobby, "联机大厅")
@@ -118,6 +145,7 @@ class MappingWindow(QWidget):
         self.public_room = QGroupBox("发布到联机大厅")
         self.public_room.setCheckable(True)
         self.public_room.setChecked(False)
+        self.public_room.setEnabled(bool(self.lobby.api))
         room = QFormLayout(self.public_room)
         self.room_name = QLineEdit()
         self.room_name.setMaxLength(50)
@@ -213,7 +241,19 @@ class MappingWindow(QWidget):
         self.set_status(f"已载入 {len(nodes)} 个节点。")
         return True
 
+    def update_remote_ports(self):
+        node = self.node.currentData()
+        if node is None:
+            return
+        start, end = node.port_range
+        previous = self.remote_port.value()
+        self.remote_port.setRange(start, end)
+        if not start <= previous <= end:
+            self.remote_port.setValue(random.randint(start, end))
+
     def toggle_mapping(self):
+        if self.registering or self.stopping or self.closing:
+            return
         if self.process.state() != QProcess.ProcessState.NotRunning:
             self.stop_mapping()
             return
@@ -225,12 +265,43 @@ class MappingWindow(QWidget):
             return
 
         self.failure = ""
+        if node.node_id:
+            if not self.control.base:
+                self.set_status("受控节点需要可用的 Control Server，请通过 Launcher 启动。")
+                return
+            self.registering = True
+            self.set_mapping_controls(True)
+            self.start_button.setEnabled(False)
+            self.set_status("正在注册隧道…")
+            self.control.reserve(node.node_id, self.remote_port.value(),
+                                 lambda claim, error: self.start_registered(node, claim, error))
+            return
+        self.start_mapping(node)
+
+    def start_registered(self, node: Node, claim: TunnelClaim | None, error: str):
+        self.registering = False
+        if self.closing:
+            if claim:
+                self.control.release(claim)
+            return
+        if claim is None:
+            self.failure = error
+            self.mapping_finished()
+            return
+        self.claim = claim
+        self.start_mapping(node)
+
+    def start_mapping(self, node: Node):
         try:
-            self.config_dir = TemporaryDirectory(prefix="minecraftfrp-")
+            self.config_dir = TemporaryDirectory(prefix="minecrafttools-")
             config = Path(self.config_dir.name) / "frpc.toml"
-            write_frpc_config(config, node, self.local_port.value(), self.remote_port.value())
+            write_frpc_config(config, node, self.local_port.value(), self.remote_port.value(), self.claim)
         except (OSError, UnicodeError):
             self.failure = "无法写入临时配置。"
+            self.mapping_finished()
+            return
+        except ValueError as error:
+            self.failure = str(error)
             self.mapping_finished()
             return
 
@@ -240,10 +311,44 @@ class MappingWindow(QWidget):
         self.set_status("正在连接节点…")
         self.start_timeout.start(20_000)
         self.process.start(str(self.frpc), ["-c", str(config)])
+        if self.claim:
+            self.renew_at = monotonic() + 25
+            self.status_timer.start()
+
+    def poll_tunnel(self):
+        claim = self.claim
+        if not claim or self.status_pending or self.stopping or self.closing:
+            return
+        self.status_pending = True
+        renew = monotonic() >= self.renew_at
+
+        def finished(code, payload):
+            if self.claim is not claim:
+                return
+            self.status_pending = False
+            if self.stopping or self.closing:
+                return
+            if code == 200 and renew:
+                self.renew_at = monotonic() + 25
+            if code == 200 and payload.get("status") in ("block_pending", "blocked"):
+                reason = payload.get("reason")
+                if reason == "no_minecraft_status":
+                    reason = "未检测到 Minecraft Java 响应。"
+                self.failure = "隧道已封禁。"
+                if isinstance(reason, str) and reason.strip():
+                    self.failure += reason.strip()[:200]
+            elif code in (401, 404):
+                self.failure = "隧道注册已失效，请重新启动映射。"
+            else:
+                return
+            self.stop_mapping()
+
+        self.control.status(claim, renew, finished)
 
     def set_mapping_controls(self, running: bool):
-        for widget in (self.node, self.load_button, self.local_port, self.remote_port, self.public_room):
+        for widget in (self.node, self.load_button, self.local_port, self.remote_port):
             widget.setEnabled(not running)
+        self.public_room.setEnabled(not running and bool(self.lobby.api))
         self.start_button.setText("停止映射" if running else "启动映射")
         self.start_button.setEnabled(self.node.count() > 0)
         if not running:
@@ -290,8 +395,10 @@ class MappingWindow(QWidget):
     def stop_mapping(self):
         self.stopping = True
         self.start_timeout.stop()
+        self.status_timer.stop()
         self.lobby.unpublish()
-        self.set_status("正在停止映射…")
+        self.set_status(self.failure or "正在停止映射…")
+        self.link.clear()
         self.start_button.setEnabled(False)
         self.copy_button.setEnabled(False)
         self.stop_timeout.start(2000)
@@ -306,6 +413,11 @@ class MappingWindow(QWidget):
         self.lobby.unpublish()
         self.start_timeout.stop()
         self.stop_timeout.stop()
+        self.status_timer.stop()
+        self.status_pending = False
+        claim, self.claim = self.claim, None
+        if claim:
+            self.control.release(claim)
         if self.config_dir is not None:
             self.config_dir.cleanup()
             self.config_dir = None
@@ -319,13 +431,23 @@ class MappingWindow(QWidget):
         self.stopping = False
 
     def closeEvent(self, event: QCloseEvent):
+        self.closing = True
         self.lobby.unpublish()
         if self.process.state() != QProcess.ProcessState.NotRunning:
             self.process.kill()
             if not self.process.waitForFinished(2000):
+                self.closing = False
                 event.ignore()
                 return
         event.accept()
+
+
+def send_launcher_ready(port: str, token: str) -> None:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1) as connection:
+            connection.sendall(f"READY {token}\n".encode("ascii"))
+    except (OSError, ValueError, OverflowError):
+        logging.getLogger(__name__).warning("无法向 Launcher 发送就绪信号。")
 
 
 def main() -> int:
@@ -334,25 +456,36 @@ def main() -> int:
     parser.add_argument("--frpc", type=Path)
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     options = parser.parse_args()
+    launcher_port = os.environ.get("MINECRAFTTOOLS_LAUNCHER_PORT")
+    launcher_token = os.environ.get("MINECRAFTTOOLS_LAUNCHER_TOKEN")
     resources = Path(__file__).resolve().parent
     binary = "frpc.exe" if sys.platform == "win32" else "frpc"
     frpc = (options.frpc or resources / "bin" / binary).resolve()
 
     app = QApplication([sys.argv[0]])
     app.setOrganizationName("MitaHill")
-    app.setApplicationName("MinecraftFRP")
+    app.setApplicationName("MinecraftTools")
     app.setWindowIcon(QIcon(str(resources / "logo.ico")))
     artwork = QPixmap(str(resources / "MinecraftToolsStartupLogo.png"))
     if options.smoke_test:
         if artwork.isNull() or not frpc.is_file():
             return 1
-        result = subprocess.run([str(frpc), "--version"], timeout=10)
+        result = subprocess.run([str(frpc), "--version"], timeout=10, check=False)
         if result.returncode:
             return result.returncode
     window = MappingWindow(frpc, options.nodes)
     if options.smoke_test:
         window.show()
-        QTimer.singleShot(0, app.quit)
+
+        def finish_smoke_test():
+            if launcher_port and launcher_token:
+                send_launcher_ready(launcher_port, launcher_token)
+            app.quit()
+
+        QTimer.singleShot(0, finish_smoke_test)
+    elif launcher_port and launcher_token:
+        window.show()
+        QTimer.singleShot(0, lambda: send_launcher_ready(launcher_port, launcher_token))
     elif artwork.isNull():
         window.show()
     else:

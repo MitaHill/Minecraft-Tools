@@ -5,8 +5,14 @@ from hashlib import sha256
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
 )
 
 
@@ -64,9 +70,11 @@ class RoomCard(QFrame):
 class LobbyTab(QWidget):
     publication_status = Signal(str)
 
-    def __init__(self):
+    def __init__(self, control: str = ""):
         super().__init__()
-        self.api = os.environ.get("MINECRAFTFRP_LOBBY_URL", "https://mapi.clash.ink/api/lobby").rstrip("/")
+        self.api = os.environ.get(
+            "MINECRAFTTOOLS_LOBBY_URL", os.environ.get("MINECRAFTFRP_LOBBY_URL", f"{control}/api/v1/lobby" if control else "")
+        ).strip().rstrip("/")
         self.network = QNetworkAccessManager(self)
         self.active_room = None
         self.last_sent = None
@@ -81,6 +89,7 @@ class LobbyTab(QWidget):
         header = QHBoxLayout()
         header.addWidget(QLabel("正在联机的房间"), 1)
         self.refresh_button = QPushButton("刷新列表")
+        self.refresh_button.setEnabled(bool(self.api))
         self.refresh_button.clicked.connect(self.refresh_rooms)
         header.addWidget(self.refresh_button)
         layout.addLayout(header)
@@ -94,7 +103,7 @@ class LobbyTab(QWidget):
         scroll.setWidget(rooms)
         layout.addWidget(scroll, 1)
 
-        self.status = QLabel("准备就绪")
+        self.status = QLabel("准备就绪" if self.api else "尚未配置联机大厅服务。")
         self.online = QLabel("在线人数: —")
         footer = QHBoxLayout()
         footer.addWidget(self.status, 1)
@@ -130,6 +139,8 @@ class LobbyTab(QWidget):
             self.refresh_rooms()
 
     def refresh_rooms(self):
+        if not self.api:
+            return
         self.visited = True
         self.refresh_button.setEnabled(False)
         self.status.setText("正在加载房间列表…")

@@ -10,7 +10,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.request import Request, urlopen
 
-
 RELEASES = "https://api.github.com/repos/fatedier/frp/releases"
 TAG_PATTERN = re.compile(r"v\d+\.\d+\.\d+")
 
@@ -19,7 +18,7 @@ def release_info(tag: str | None = None) -> dict:
     if tag is not None and not TAG_PATTERN.fullmatch(tag):
         raise ValueError(f"Invalid FRP tag: {tag}")
     endpoint = f"tags/{tag}" if tag else "latest"
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "MinecraftFRP-build"}
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "MinecraftTools-build"}
     if token := os.getenv("GH_TOKEN"):
         headers["Authorization"] = f"Bearer {token}"
     with urlopen(Request(f"{RELEASES}/{endpoint}", headers=headers), timeout=30) as response:

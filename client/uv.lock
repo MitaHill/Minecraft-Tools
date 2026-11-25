@@ -24,7 +24,7 @@ wheels = [
 ]
 
 [[package]]
-name = "minecraftfrp"
+name = "minecrafttools"
 version = "0.0.0"
 source = { editable = "." }
 dependencies = [
