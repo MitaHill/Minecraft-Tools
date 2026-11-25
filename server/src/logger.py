@@ -18,7 +18,7 @@ def setup_logger():
     log_file = os.path.join(log_dir, "server.log")
     
     # 创建 Logger
-    logger = logging.getLogger("MinecraftFRP_Server")
+    logger = logging.getLogger("MinecraftTools_Server")
     logger.setLevel(logging.INFO)
     
     # 防止重复添加 Handler

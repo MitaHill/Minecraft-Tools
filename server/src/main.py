@@ -18,7 +18,7 @@ from .security import RateLimitMiddleware
 from .moderation import moderator
 from .minecraft_pinger import get_server_motd, get_server_status
 
-ADMIN_KEY = os.getenv("MINECRAFTFRP_ADMIN_KEY")
+ADMIN_KEY = os.getenv("MINECRAFTTOOLS_ADMIN_KEY", os.getenv("MINECRAFTFRP_ADMIN_KEY"))
 
 async def verify_admin(x_admin_key: str = Header(None)):
     if not ADMIN_KEY or x_admin_key != ADMIN_KEY:
@@ -297,7 +297,7 @@ async def get_online():
 
 @app.get("/")
 async def root():
-    return {"message": "MinecraftFRP Lobby Server is running"}
+    return {"message": "MinecraftTools Lobby Server is running"}
 
 # --- Admin APIs ---
 

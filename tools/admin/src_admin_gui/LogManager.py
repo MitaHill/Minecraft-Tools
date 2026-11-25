@@ -16,7 +16,7 @@ class LogManager:
     _logger = None
 
     @staticmethod
-    def get_logger(name: str = "MinecraftFRP_Admin") -> logging.Logger:
+    def get_logger(name: str = "MinecraftTools_Admin") -> logging.Logger:
         """
         获取或配置全局 Logger 单例。
         """
@@ -29,7 +29,7 @@ class LogManager:
         """
         初始化日志配置：同时输出到控制台和文件。
         """
-        logger = logging.getLogger("MinecraftFRP_Admin")
+        logger = logging.getLogger("MinecraftTools_Admin")
         logger.setLevel(logging.INFO)
         
         # 防止重复添加 Handler
@@ -71,5 +71,5 @@ class LogManager:
         LogManager._logger = logger
 
 # 便捷入口
-def get_logger(name: str = "MinecraftFRP_Admin") -> logging.Logger:
+def get_logger(name: str = "MinecraftTools_Admin") -> logging.Logger:
     return LogManager.get_logger(name)

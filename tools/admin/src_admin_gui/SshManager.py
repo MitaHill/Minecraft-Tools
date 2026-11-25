@@ -65,13 +65,16 @@ class SSHManager:
 
 class ServerManagementConfig:
     def __init__(self):
+        def setting(name):
+            return os.getenv(f"MINECRAFTTOOLS_{name}", os.getenv(f"MINECRAFTFRP_{name}", ""))
+
         self.ssh_manager = SSHManager()
-        self.admin_password = os.getenv("MINECRAFTFRP_ADMIN_PASSWORD", "")
-        self.server_host = os.getenv("MINECRAFTFRP_SSH_HOST", "")
-        self.server_user = os.getenv("MINECRAFTFRP_SSH_USER", "")
-        self.server_password = os.getenv("MINECRAFTFRP_SSH_PASSWORD", "")
+        self.admin_password = setting("ADMIN_PASSWORD")
+        self.server_host = setting("SSH_HOST")
+        self.server_user = setting("SSH_USER")
+        self.server_password = setting("SSH_PASSWORD")
         self.remote_file_path = "/root/chfs/share/MinecraftFRP/Data/frp-server-list.json"
-        self.encryption_key = os.getenv("MINECRAFTFRP_SERVER_LIST_KEY", "")
+        self.encryption_key = setting("SERVER_LIST_KEY")
         self.config_dir = Path("config")
         
     def verify_admin_password(self, password):
