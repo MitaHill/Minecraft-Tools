@@ -1,6 +1,6 @@
 # 客户端更新与节点构建计划
 
-本页记录下一阶段的实现目标。当前仓库的操作步骤见 [构建说明](build.md)。
+本页记录自动更新和发布的实现及验收目标。当前构建操作见[构建说明](build.md)。真实 MinecraftTools 客户端和 Launcher 已通过本地启动与诊断联调，并在 Phoenix 独立联调实例通过 macOS arm64 的签名更新和回滚测试。 [Launcher 说明](../launcher/README.md)
 
 ## 旧版更新器源码复核
 
@@ -14,7 +14,7 @@
 
 备份里还有两条独立路径。`src_updater/main.py` 接收已下载的新 EXE，等待旧进程和文件锁，尝试备份、替换、失败回滚和重启，使用 PySide6 和 `psutil`。`src_updater/launcher.py` 是另一套 PySide6 启动器，会从单条版本记录检查并下载 Windows EXE，用户确认后直接覆盖并启动。这两个入口均未进入当前仓库的六平台构建。
 
-当前工作树和已生成的 macOS 压缩包均没有独立更新器。现有 CI 中的 `fetch_frpc.py` 用于构建阶段获取上游 `frpc`。
+当前仓库已有独立 Launcher 原型，桌面 CI 生成的客户端压缩包尚未组装 Launcher。现有 CI 中的 `fetch_frpc.py` 用于构建阶段获取上游 `frpc`。
 
 ## 主体程序和小型更新器
 
@@ -61,15 +61,15 @@ Launcher 启动主体程序前，先在 `127.0.0.1` 的临时端口监听，通�
 
 | 系统 | 配置和安装状态 | 日志 | 可清理的更新缓存 |
 | --- | --- | --- | --- |
-| Windows | `%LOCALAPPDATA%\MitaHill\MinecraftFRP\` | 同根目录的 `logs\` | 同根目录的 `cache\` |
-| macOS | `~/Library/Application Support/com.mitahill.minecraftfrp/` | `~/Library/Logs/com.mitahill.minecraftfrp/` | `~/Library/Caches/com.mitahill.minecraftfrp/` |
-| Linux | 配置用 `$XDG_CONFIG_HOME/minecraftfrp/`，安装状态用 `$XDG_STATE_HOME/minecraftfrp/` | `$XDG_STATE_HOME/minecraftfrp/logs/` | `$XDG_CACHE_HOME/minecraftfrp/` |
+| Windows | `%LOCALAPPDATA%\MitaHill\MinecraftTools\` | 同根目录的 `logs\` | 同根目录的 `cache\` |
+| macOS | `~/Library/Application Support/com.mitahill.minecrafttools/` | `~/Library/Logs/com.mitahill.minecrafttools/` | `~/Library/Caches/com.mitahill.minecrafttools/` |
+| Linux | 配置用 `$XDG_CONFIG_HOME/minecrafttools/`，安装状态用 `$XDG_STATE_HOME/minecrafttools/` | `$XDG_STATE_HOME/minecrafttools/logs/` | `$XDG_CACHE_HOME/minecrafttools/` |
 
 Linux 未设置对应变量时，依次使用 `~/.config`、`~/.local/state` 和 `~/.cache`。更新临时文件进入缓存，恢复安装所需的状态单独保存。[Windows Known Folders](https://learn.microsoft.com/windows/win32/shell/knownfolderid) · [macOS 应用数据目录](https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/AccessingFilesandDirectories/AccessingFilesandDirectories.html) · [XDG 目录规范](https://specifications.freedesktop.org/basedir/)
 
 ### 开屏窗口
 
-Launcher 用一个无边框窗口显示现有开屏图，窗口随实际启动进度打开和关闭。主体程序初始化完成后直接显示主窗口并发送 `READY`。[开屏图](../client/src/minecraftfrp/MinecraftToolsStartupLogo.png)
+Launcher 用一个无边框窗口显示现有开屏图，窗口随实际启动进度打开和关闭。主体程序初始化完成后直接显示主窗口并发送 `READY`。[开屏图](../client/src/minecrafttools/MinecraftToolsStartupLogo.png)
 
 开屏图右下角叠一行右对齐的白色小字，随启动阶段更新，例如「检查网络」「尝试连接服务器」「检查更新」「下载更新 42%」「正在启动」。文字与图边留出内距，遇到亮色纹理时加局部深色衬底，保持小字清楚。
 
@@ -82,7 +82,16 @@ Launcher 用一个无边框窗口显示现有开屏图，窗口随实际启动�
 - 使用单实例锁、明确的网络超时和有限重试。用更新器内置的发布公钥验证元数据签名，下载到独立的临时位置，核对包大小和 SHA-256 后安装。元数据绑定通道、版本、操作系统及架构。
 - 在可写的用户安装位置暂存完整新版，再切换应用目录或应用包。保留可恢复的旧文件，直到新版本通过启动检查。中途退出、掉电或启动失败时，下一次运行能够恢复到完整安装。用户设置和日志独立保存。
 - Windows 验证进程退出和文件锁处理。macOS 验证完整 `.app` 的替换、签名和公证。Linux 验证架构、执行权限和完整目录切换。六种系统与架构组合都要验证断网退出且无上报、dev 回退后保留所选通道、包损坏、磁盘空间不足、文件占用、重复启动、中途退出后的恢复，以及主体程序就绪、提前退出或 30 秒超时时的处理。
-- 体积上限、安装包格式和更新器自身的升级方式留待实现前确定。CI 应报告六种更新器产物的大小。
+- CI 应报告六种安装包和更新包的大小，体积上限根据实测结果确定。
+
+### 签名更新的实施与验收
+
+1. 在 `dev` 和 `stable` 签名清单中绑定通道、生成时间、有效期、平台、版本、大小与 SHA-256。外层记录 `schema`、`key_id`、`payload`、`signature`。`payload` 为原始 UTF-8 JSON 的 Base64URL 编码，Ed25519 签名覆盖原始字节。Launcher 用内置公钥按 `key_id` 验证，清单签名或内容校验失败视为更新源不可用。
+2. 先构建六平台更新包并校验下载内容，再生成并签署通道清单。托管侧先上传完整版本文件，验证路径与校验值之后才发布清单。空的通道也提供已签名的清单，以便 Launcher 区分暂无更新和读取失败。
+3. Launcher 把通过校验的包展开到用户安装目录中的独立版本目录。解包时校验路径范围，macOS 保留 `.app` 内部的有效相对符号链接。安装状态在新主体发出 `READY` 后原子提交。启动失败时用之前的完整版本恢复，清理失败候选并保存诊断。启动器进程与主体程序的版本目录分开。
+4. 首先用隔离测试签名密钥验证候选版本安装、签名错误、下载损坏、安装中断和 `READY` 超时。随后接入 `dev` 和 `stable` 正式签名与六平台 CI，用各原生安装入口验证首次运行、更新成功及回滚。
+
+2026-11-25 在 Phoenix 独立联调实例使用测试密钥完成 macOS arm64 验收。Launcher 验证空的 dev 清单后回退到 stable，下载完整 `.app`，保留包内符号链接，收到 `READY` 后才写入安装状态。随后发布一个签名有效、启动后故意退出的 dev 测试候选。Launcher 恢复同一个 stable 版本，显示回滚结果，上报诊断，并清除失败候选。联调结束后恢复空的 dev 清单。Windows、Linux、macOS amd64 和正式签名、公证仍需原生验收。
 
 ## GitHub Actions 发布与节点写入
 
@@ -91,10 +100,24 @@ Launcher 用一个无边框窗口显示现有开屏图，窗口随实际启动�
 - 沿用 `yyyy-mm-dd-n` 作为安装版本号。拟保留 `stable` 的现有日期标签，`dev` 使用 `dev-yyyy-mm-dd-n` 标签并发为 GitHub 预发布。按通道筛选发布记录与已验证的元数据。GitHub 的 `/releases/latest` 排除预发布，无法用于查找 `dev`。[GitHub Releases API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
 - 每个通道的发布都构建 Windows、macOS、Linux 的 amd64 和 arm64 产物。六组产物、配套元数据及基本安装和更新测试通过后，版本才对更新器可见。日常测试构建仅使用测试节点并生成 CI 产物。
 
+### CI/CD 与桌面安装包
+
+PR 和 `main` 构建并测试四个组件。桌面端在六个原生目标上编译 Rust Launcher，以 PyInstaller `--onedir` 打包 Main App，再把两者组装为一个安装产物。安装后的应用入口指向 Launcher，冒烟测试从该入口启动并验证 Main App 发出的 `READY`。
+
+| 平台 | 首版拟用格式 | 安装方式 |
+| --- | --- | --- |
+| Windows | WiX `.msi` | 按当前用户安装，支持开始菜单和系统卸载。MSI 内部使用与日期版本排序一致的三段数字版本。 |
+| macOS | `.dmg` | 拖入包含两个组件的 `MinecraftTools.app`。正式版对应用签名并做 Apple 公证。 |
+| Linux | Makeself `.run` | 安装到用户目录，添加桌面菜单入口并提供卸载命令。首版以 Ubuntu 24.04 为验证基线。 |
+
+发布标签通过 CI 后，GitHub Release 提供六个安装包、自动更新包和校验文件。首版由 Launcher 自动更新 Main App，Launcher 自身通过完整安装包升级。Control Server 和 FRP Agent 各构建并测试一个覆盖 `linux/amd64` 和 `linux/arm64` 的镜像，再以同一个 `yyyy-mm-dd-n` 标签推送到 [Docker Hub 镜像仓库](build.md#docker-hub-镜像)。
+
+如启用 Phoenix 的 SFTP 发布，上传作业在构建和验证通过后传输指定的发布文件。由 Phoenix 托管更新时，先上传并校验版本文件，最后才切换对应通道的签名清单。GitHub 的环境名称、变量和目前的配置状态见[发布环境与凭据](build.md#发布环境与凭据)。
+
 ### 在构建时写入节点数据
 
 1. 为 `dev` 和 `stable` 使用对应的 GitHub Actions Environment。公开节点配置用环境 Variables。需要限制 GitHub 中查看权限的构建输入可用环境 Secrets，签名私钥等发布凭据只在对应 CI 作业中使用。[GitHub Actions Environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments) · [GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
-2. 每次 CI 打包前校验节点列表，再生成供主体程序导入的 Python 源码。新增的只读节点目录类只存放节点记录及顺序。沿用现有 `Node` 字段 `name`、`server_addr`、`server_port`、可选 `public_host` 和可随客户端分发的节点 token。缺少节点、字段错误或名称冲突时中止发布构建。六种系统与架构组合使用同一份通道节点数据，生成文件留在构建工作区。
+2. 每次 CI 打包前校验节点列表，再生成供主体程序导入的 Python 源码。新增的只读节点目录类只存放节点记录及顺序。沿用现有 `Node` 字段 `name`、`server_addr`、`server_port`、可选 `public_host` 和可随客户端分发的节点 token。受控节点包含 `remote_port_start`、`remote_port_end`，范围与节点的 `allowPorts` 一致。缺少节点、字段错误或名称冲突时中止发布构建。六种系统与架构组合使用同一份通道节点数据，生成文件留在构建工作区。
 3. 主体程序直接从节点目录类填充「映射」页的线路下拉框，移除「加载节点」、文件选择器、`--nodes`、保存上次节点文件路径和 TOML 导入解析。保留节点选择及供 `frpc` 使用的临时配置生成。修改内置节点后，通过对应通道发新版下发。
 
 写入公开发布包的值可被用户提取，包括节点 token。任何必须保密的凭据只保存在 CI 或服务端。macOS Keychain 如用于导入 CI 签名证书，属于签名步骤。
