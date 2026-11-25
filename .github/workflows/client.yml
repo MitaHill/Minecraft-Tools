@@ -206,11 +206,12 @@ jobs:
           NODE_CATALOG_DIR: ${{ runner.temp }}/release-nodes
         run: |
           set -euo pipefail
-          node_args=()
+          build=(uv run --project client --no-sync python client/scripts/build.py --frpc "$FRPC" --version "$BUILD_VERSION")
+          # macOS runners still ship bash 3.2, where an empty array trips `set -u`.
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            node_args=(--nodes-file "$NODE_CATALOG_DIR/release-nodes.toml")
+            build+=(--nodes-file "$NODE_CATALOG_DIR/release-nodes.toml")
           fi
-          uv run --project client --no-sync python client/scripts/build.py --frpc "$FRPC" --version "$BUILD_VERSION" "${node_args[@]}"
+          "${build[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: minecrafttools-${{ matrix.system }}-${{ matrix.arch }}
