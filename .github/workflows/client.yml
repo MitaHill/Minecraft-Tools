@@ -295,7 +295,7 @@ jobs:
           chmod +x "$run"
           export HOME="$RUNNER_TEMP/home"
           mkdir -p "$HOME"
-          sh "$run"
+          "$run"
           target="$HOME/.local/share/minecrafttools"
           test -x "$target/MinecraftToolsLauncher"
           "$target/MinecraftToolsLauncher" --smoke-test --local-fixture
