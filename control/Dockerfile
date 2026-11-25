@@ -5,7 +5,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM ghcr.io/astral-sh/uv:0.12.9 AS uv-binary
+FROM ghcr.io/astral-sh/uv:0.13.10 AS uv-binary
 
 FROM python:3.12-slim-bookworm
 WORKDIR /app
