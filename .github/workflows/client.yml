@@ -190,6 +190,16 @@ jobs:
           [ -n "${MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS:-}" ] || unset MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS
           [ -n "${MINECRAFTTOOLS_CONTROL_URL:-}" ] || unset MINECRAFTTOOLS_CONTROL_URL
           cargo +stable build --locked --release --manifest-path launcher/Cargo.toml --bin launcher
+      - name: Verify Launcher needs no VC++ runtime
+        if: matrix.system == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'launcher/target/release/launcher.exe'
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          $needed = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') |
+            Where-Object { $text.Contains($_, [StringComparison]::OrdinalIgnoreCase) }
+          if ($needed) { throw "Launcher still imports the VC++ runtime: $($needed -join ', ')" }
       - name: Fetch verified frpc
         shell: bash
         env:
