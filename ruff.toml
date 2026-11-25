@@ -1,0 +1,11 @@
+# client/ 和 control/ 的 Python 检查规则。server/ 与 tools/admin/ 是待迁移的旧代码，
+# 默认排除，迁移时再逐个目录去掉。
+line-length = 100
+target-version = "py314"
+exclude = ["server/**", "tools/**"]
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "SIM", "PLW"]
+
+[lint.isort]
+known-first-party = ["app", "minecrafttools"]
