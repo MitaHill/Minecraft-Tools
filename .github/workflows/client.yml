@@ -223,7 +223,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          dotnet tool install --global wix --version 5.0.2
+          dotnet tool install --global wix --version 7.0.1 || dotnet tool update --global wix --version 7.0.1
           "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Install makeself and runtime libraries
         if: runner.os == 'Linux'
