@@ -268,8 +268,11 @@ jobs:
           $code = (Start-Process msiexec -ArgumentList $arguments -Wait -PassThru).ExitCode
           if ($code -notin 0, 3010) { Get-Content $log -Tail 60; throw "MSI install failed: $code" }
           $launcher = Join-Path $env:LOCALAPPDATA 'Programs\MinecraftTools\MinecraftToolsLauncher.exe'
-          & $launcher --smoke-test --local-fixture
-          if ($LASTEXITCODE -ne 0) { throw "Launcher smoke failed: $LASTEXITCODE" }
+          $proc = Start-Process $launcher -ArgumentList @('--smoke-test', '--local-fixture') -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Get-ChildItem "$env:MINECRAFTTOOLS_DATA_ROOT\logs" -ErrorAction SilentlyContinue | Get-Content -Tail 40
+            throw "Launcher smoke failed: $($proc.ExitCode)"
+          }
           $code = (Start-Process msiexec -ArgumentList @('/x', "`"$($msi.FullName)`"", '/qn', '/norestart') -Wait -PassThru).ExitCode
           if ($code -notin 0, 3010) { throw "MSI uninstall failed: $code" }
       - name: Smoke test installed entry (macOS)
