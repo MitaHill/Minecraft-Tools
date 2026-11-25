@@ -2,13 +2,13 @@ name: Client build
 
 on:
   pull_request:
-    paths: ['client/**', '.github/workflows/client.yml']
+    paths: ['client/**', 'launcher/**', 'control/**', 'node/**', '.github/workflows/client.yml']
   push:
     branches: [main]
     tags:
-      - '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[1-9]'
-      - '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[1-9][0-9]+'
-    paths: ['client/**', '.github/workflows/client.yml']
+      - '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[1-9]*'
+      - 'dev-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[1-9]*'
+    paths: ['client/**', 'launcher/**', 'control/**', 'node/**', '.github/workflows/client.yml']
   workflow_dispatch:
 
 permissions:
@@ -24,6 +24,7 @@ jobs:
     outputs:
       frp-tag: ${{ steps.metadata.outputs.frp-tag }}
       version: ${{ steps.metadata.outputs.version }}
+      channel: ${{ steps.metadata.outputs.channel }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -37,10 +38,56 @@ jobs:
           frp_tag=$(python3 client/scripts/fetch_frpc.py --latest-tag)
           echo "frp-tag=$frp_tag" >> "$GITHUB_OUTPUT"
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            python3 - <<'PY'
+          import os
+          import re
+          from datetime import date
+
+          tag = os.environ['GITHUB_REF_NAME']
+          match = re.fullmatch(r'(dev-)?([0-9]{4}-[0-9]{2}-[0-9]{2})-([1-9][0-9]*)', tag)
+          if not match or int(match[3]) > 4294967295:
+              raise SystemExit('Invalid release tag')
+          date.fromisoformat(match[2])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f'version={match[2]}-{match[3]}', file=output)
+              print('channel=dev' if match[1] else 'channel=stable', file=output)
+          PY
           else
             echo "version=ci-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           fi
+
+  control:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: '0.13.10'
+      - run: uv sync --project control --locked
+      - name: Test Control Server
+        run: PYTHONPATH=control uv run --project control --no-sync python -m unittest discover -s control/tests -v
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: control/web/package-lock.json
+      - run: npm --prefix control/web ci
+      - run: npm --prefix control/web run typecheck
+
+  node:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: node/go.mod
+      - name: Test FRP Agent
+        run: go test ./...
+        working-directory: node
 
   build:
     needs: prepare
@@ -62,6 +109,7 @@ jobs:
       TARGET_OS: ${{ matrix.system }}
       TARGET_ARCH: ${{ matrix.arch }}
       FRPC: client/build/frp/${{ matrix.binary }}
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -76,6 +124,12 @@ jobs:
           sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
       - run: uv sync --project client --locked --extra build
       - run: uv run --project client --no-sync python -m unittest discover -s client/tests -v
+      - name: Test Launcher installation and rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          cargo +stable test --locked --manifest-path launcher/Cargo.toml
       - name: Fetch verified frpc
         shell: bash
         env:
@@ -86,7 +140,7 @@ jobs:
         run: uv run --project client --no-sync python client/scripts/build.py --frpc "$FRPC" --version "$BUILD_VERSION"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: minecraftfrp-${{ matrix.system }}-${{ matrix.arch }}
+          name: minecrafttools-${{ matrix.system }}-${{ matrix.arch }}
           path: client/dist/artifacts/*
           if-no-files-found: error
 
@@ -94,25 +148,107 @@ jobs:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [prepare, build]
     runs-on: ubuntu-24.04
+    environment: release-signing
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: minecraftfrp-*
+          pattern: minecrafttools-*
           merge-multiple: true
           path: artifacts
+      - name: Sign desktop update manifest
+        shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SIGNING_KEY_PEM: ${{ secrets.RELEASE_SIGNING_KEY_PEM }}
+          RELEASE_KEY_ID: ${{ vars.MINECRAFTTOOLS_RELEASE_KEY_ID }}
+          RELEASE_PUBLIC_KEYS: ${{ vars.MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$RELEASE_SIGNING_KEY_PEM" > "$key"
+          unset RELEASE_SIGNING_KEY_PEM
+          openssl pkey -in "$key" -pubout -outform DER | python3 -c '
+          import base64, json, os, sys
+          key = sys.stdin.buffer.read()
+          if len(key) != 44 or key[:12] != bytes.fromhex("302a300506032b6570032100"):
+              raise SystemExit("Expected Ed25519 signing key")
+          actual = base64.urlsafe_b64encode(key[12:]).decode().rstrip("=")
+          if json.loads(os.environ["RELEASE_PUBLIC_KEYS"]).get(os.environ["RELEASE_KEY_ID"]) != actual:
+              raise SystemExit("Signing key does not match the Launcher trust configuration")
+          '
+          shopt -s nullglob
+          updates=(artifacts/MinecraftTools-update-*.tar.gz)
+          [[ "${#updates[@]}" -eq 6 ]]
+          python3 control/scripts/sign_releases.py --channel "$RELEASE_CHANNEL" \
+            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
+            --key-id "$RELEASE_KEY_ID" --private-key "$key" --output artifacts \
+            --matrix-version "$RELEASE_VERSION" "${updates[@]}"
       - name: Publish GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           FRP_TAG: ${{ needs.prepare.outputs.frp-tag }}
+          RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
         run: |
           set -euo pipefail
           cd artifacts
           shopt -s nullglob
-          files=(MinecraftFRP-*.zip MinecraftFRP-*.tar.gz)
-          [[ "${#files[@]}" -eq 6 ]]
+          files=(MinecraftTools-*.zip MinecraftTools-*.tar.gz)
+          [[ "${#files[@]}" -eq 12 ]]
           sha256sum "${files[@]}" > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" "${files[@]}" SHA256SUMS \
+          flags=()
+          if [[ "$RELEASE_CHANNEL" == dev ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" SHA256SUMS "$RELEASE_CHANNEL.json" "${flags[@]}" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --notes "Bundled frpc: $FRP_TAG"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-channel-manifest
+          path: artifacts/${{ needs.prepare.outputs.channel }}.json
+          if-no-files-found: error
+
+  deploy-manifest:
+    if: vars.MINECRAFTTOOLS_PUBLISH_MANIFEST == 'true'
+    needs: [prepare, release]
+    runs-on: ubuntu-24.04
+    environment: ssh-publish
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-channel-manifest
+          path: manifest
+      - name: Publish channel manifest to Control Server
+        shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+          SFTP_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SFTP_HOST: ${{ vars.DEPLOY_SSH_HOST }}
+          SFTP_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+          SFTP_USER: ${{ vars.DEPLOY_SSH_USER }}
+          SFTP_KNOWN_HOSTS: ${{ vars.DEPLOY_SSH_KNOWN_HOSTS }}
+          SFTP_DIRECTORY: ${{ vars.DEPLOY_SSH_DIRECTORY }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_CHANNEL" == stable || "$RELEASE_CHANNEL" == dev ]]
+          [[ "$SFTP_DIRECTORY" =~ ^/[a-zA-Z0-9_./-]+$ && "$SFTP_DIRECTORY" != *..* ]]
+          [[ "$SFTP_HOST" =~ ^[a-zA-Z0-9.-]+$ && "$SFTP_PORT" =~ ^[0-9]+$ && "$SFTP_USER" =~ ^[a-zA-Z0-9_-]+$ ]]
+          umask 077
+          scratch=$(mktemp -d)
+          trap 'rm -rf "$scratch"' EXIT
+          printf '%s\n' "$SFTP_KEY" > "$scratch/key"
+          printf '%s\n' "$SFTP_KNOWN_HOSTS" > "$scratch/known_hosts"
+          unset SFTP_KEY
+          pending="$SFTP_DIRECTORY/.$RELEASE_CHANNEL-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          sftp -b - -P "$SFTP_PORT" -i "$scratch/key" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$scratch/known_hosts" -- "$SFTP_USER@$SFTP_HOST" <<EOF
+          put manifest/$RELEASE_CHANNEL.json $pending
+          chmod 644 $pending
+          rename $pending $SFTP_DIRECTORY/$RELEASE_CHANNEL.json
+          EOF
