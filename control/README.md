@@ -2,7 +2,7 @@
 
 Control Server 实现 [Launcher API](../docs/control-server.md#61-launcher-兼容-api根路径必须与-launcher-完全一致)。`dev` 和 `stable` 从发布目录读取签名清单。服务启动时运行 Alembic 迁移，诊断写入 SQLite 后返回 `201`。原报告保存在 `report`，`os` 和 `arch` 两列用于按平台查询。
 
-联调入口是 `https://ctl.mctools.mitahill.com`（Phoenix）。宿主机 nginx 终止 TLS 后代理到 control 容器，节点 Hub 仍使用 `us-6.mitahill.com:19443`。发布清单位于宿主机 `/srv/minecrafttools-integration/tls-node-trial/releases`，通过 `compose.releases.yaml` 只读挂载。
+联调入口是 `https://ctl.mctools.mitahill.com`（Phoenix）。宿主机 nginx 终止 TLS 后代理到 control 容器，并在 `/api/v1/node/connect` 为 dev Agent 升级 WebSocket。原生 TLS 节点入口仍为 `us-6.mitahill.com:19443`。发布清单位于宿主机 `/srv/minecrafttools-integration/tls-node-trial/releases`，通过 `compose.releases.yaml` 只读挂载。
 
 ## 启动服务
 
@@ -50,14 +50,14 @@ release_trial=$(mktemp -d "${TMPDIR:-/tmp}/minecrafttools-release.XXXXXX")
 openssl genpkey -algorithm ED25519 -out "$release_trial/key.pem"
 for channel in dev stable; do
   python3 control/scripts/sign_releases.py --channel "$channel" \
-    --base-url http://127.0.0.1:8765/releases/artifacts --key-id local-test \
+    --base-url "http://127.0.0.1:8765/releases/artifacts/$channel" --key-id local-test \
     --private-key "$release_trial/key.pem" --output "$control_root/data/releases"
 done
 export MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS=$(openssl pkey -in "$release_trial/key.pem" -pubout -outform DER | \
   python3 -c 'import base64,json,sys; print(json.dumps({"local-test":base64.urlsafe_b64encode(sys.stdin.buffer.read()[-32:]).decode().rstrip("=")}))')
 ```
 
-查询健康状态和两份清单，再给 Launcher 指定独立的安装状态目录和已打包的主体程序。回环 HTTP 适用于本段空清单启动测试，签名清单中的正式更新包 URL 使用 HTTPS。
+查询健康状态和两份清单，再给 Launcher 指定独立的安装状态目录和已打包的主体程序。更新包放在 `$control_root/data/releases/<channel>/artifacts/`，清单仍是 `releases/<channel>.json`。回环 HTTP 适用于本段空清单启动测试，签名清单中的正式更新包 URL 使用 HTTPS。
 
 ```sh
 curl -fsS http://127.0.0.1:8765/health

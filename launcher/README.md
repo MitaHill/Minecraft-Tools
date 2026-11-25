@@ -108,7 +108,7 @@ cargo run --bin launcher -- \
       "version": "2026-01-02-1",
       "os": "darwin",
       "arch": "arm64",
-      "url": "https://example.com/downloads/MinecraftTools-update-2026-01-02-1-darwin-arm64.tar.gz",
+      "url": "https://ctl.mctools.mitahill.com/releases/artifacts/dev/MinecraftTools-update-2026-01-02-1-darwin-arm64.tar.gz",
       "size": 1048576,
       "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     }
@@ -126,6 +126,8 @@ cargo run --bin launcher -- \
 | GET | `/releases/dev.json` | dev 更新元数据 |
 | GET | `/releases/stable.json` | stable 更新元数据 |
 | POST | `/diagnostics` | 接收启动失败诊断 JSON |
+
+更新包地址不拼接，直接使用清单里的 `url`。线上清单指向 `/releases/artifacts/{channel}/<文件名>`。
 
 ## 数据目录
 

@@ -112,7 +112,7 @@ PR 和 `main` 构建并测试四个组件。桌面端在六个原生目标上编
 
 发布标签通过 CI 后，GitHub Release 提供六个安装包、自动更新包和校验文件。首版由 Launcher 自动更新 Main App，Launcher 自身通过完整安装包升级。Control Server 和 FRP Agent 各构建并测试一个覆盖 `linux/amd64` 和 `linux/arm64` 的镜像，再以同一个 `yyyy-mm-dd-n` 标签推送到 [Docker Hub 镜像仓库](build.md#docker-hub-镜像)。该流程已由 `.github/workflows/images.yml` 实现，标签推送时推送双架构镜像，`main` 和 PR 只做单平台构建。
 
-如启用 Phoenix 的 SFTP 发布，上传作业在构建和验证通过后传输指定的发布文件。由 Phoenix 托管更新时，先上传并校验版本文件，最后才切换对应通道的签名清单。GitHub 的环境名称、变量和目前的配置状态见[发布环境与凭据](build.md#发布环境与凭据)。
+Phoenix 托管更新时，上传作业在构建和验证通过后传输发布文件：先把该通道的 18 个发布文件（6 个更新包、6 个桌面压缩包、6 个安装包）上传到 `DEPLOY_SSH_DIRECTORY/<channel>/artifacts/`，在服务器上核对 SHA-256，再原子切换 `DEPLOY_SSH_DIRECTORY/<channel>.json`，最后删除该通道旧版本的文件。清单里的更新包 URL 指向 `MINECRAFTTOOLS_CONTROL_URL/releases/artifacts/<channel>/`，GitHub Release 只作归档和回滚来源。GitHub 的环境名称、变量和目前的配置状态见[发布环境与凭据](build.md#发布环境与凭据)。
 
 ### 发布验收矩阵
 
@@ -121,15 +121,26 @@ PR 和 `main` 构建并测试四个组件。桌面端在六个原生目标上编
 | 验收项 | 平台 | 通过条件 |
 | --- | --- | --- |
 | 安装入口 | Windows、macOS、Linux 的 amd64 和 arm64 | 校验 CI 产物，按平台安装，从系统入口启动 Launcher 并观察主体 `READY`。记录系统版本、产物 SHA-256 与启动日志。 |
-| 真实在线更新 | 同上 | 在隔离数据目录准备旧版，从已安装的 Launcher 请求 Phoenix 的签名清单并下载 GitHub 更新包。检查平台匹配、大小和 SHA-256，收到 `READY` 后再提交新版本状态。 |
+| 真实在线更新 | 同上 | 在隔离数据目录准备旧版，从已安装的 Launcher 请求 Phoenix 的签名清单并从 Control Server 下载更新包。检查平台匹配、大小和 SHA-256，收到 `READY` 后再提交新版本状态。 |
 | 失败回滚 | 同上 | 使用独立测试签名和隔离 Control Server，验证损坏的更新包以及签名有效但启动失败的候选。旧版仍能启动，版本指针保持原值，候选目录被清理，诊断可查询。 |
 | 系统安装生命周期 | 同上 | 验证安装入口、再次安装和移除应用。核对 Windows 开始菜单和 MSI 卸载、macOS 应用包、Linux 桌面入口和卸载脚本。 |
 | 正式签名 | macOS 两种架构 | 对实际 DMG 验证 Developer ID、公证票据和 Gatekeeper。 |
 
+2026-11-26 的复验使用 Actions 安装产物和 Phoeix 公开 HTTPS 入口。在线 dev 清单与 CI 产物逐字节一致。上一个版本的安装包来自 run `45650152532` 对应平台通过的安装作业。
+
+- **macOS arm64（26.5.1）**。校验新 DMG 与更新包的 SHA-256，通过应用包深度签名检查。在独立状态目录从旧 DMG 启动 `2026-11-25-2`，用同一个 Launcher 在 Phoeix 查询 dev，下载 GitHub 上 40,100,608 字节的更新包，收到 `READY` 后切换到 `2026-11-25-3`。初次下载响应超时，重新运行后成功。通过更新后客户端界面验证大厅刷新及空列表。
+- **Linux arm64（Ubuntu 24.04 容器）**。使用普通用户和 Xvfb。旧 `.run` 安装后由用户入口启动，在线更新下载 76,300,235 字节的包，并在 `READY` 后切换到 `2026-11-25-3`。通过新 `.run` 重装并启动。卸载后安装目录、命令入口与桌面入口均已移除，独立运行状态仍可读取。
+- **macOS amd64（26.5.1，Rosetta）**。旧 DMG 首启后下载 45,250,900 字节的 GitHub 更新包，收到 `READY` 后切换到目标版本。新 DMG 使用该状态再次启动成功。
+- **Linux amd64（Ubuntu 24.04 容器，Rosetta）**。用普通用户和 Xvfb 验证安装、在线下载 80,681,310 字节的更新、重装及卸载，独立运行状态可读取。
+- **Windows amd64 和 arm64**。Actions 的两个原生作业通过 MSI 安装、启动及卸载，下载的 MSI 均与 Release 的 SHA-256 一致。本轮本地 Windows 11 ARM 虚拟机在 MSI 验收期间进入挂起，真实在线更新和交互验证仍待补测。
+- **macOS arm64 隔离回滚**。在测试签名源分别提供有效签名但损坏的压缩包，以及在 `READY` 前以 37 退出的完整候选。版本状态和旧应用包保留，失败候选和下载缓存被清理。候选退出后实际 CI 主体重新启动并报告 `READY`，测试服务收到诊断。
+
 ### 在构建时写入节点数据
 
-1. 为 `dev` 和 `stable` 使用对应的 GitHub Actions Environment。公开节点配置用环境 Variables。需要限制 GitHub 中查看权限的构建输入可用环境 Secrets，签名私钥等发布凭据只在对应 CI 作业中使用。[GitHub Actions Environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments) · [GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
-2. 每次 CI 打包前校验节点列表，再生成供主体程序导入的 Python 源码。新增的只读节点目录类只存放节点记录及顺序。沿用现有 `Node` 字段 `name`、`server_addr`、`server_port`、可选 `public_host` 和可随客户端分发的节点 token。受控节点包含 `remote_port_start`、`remote_port_end`，范围与节点的 `allowPorts` 一致。缺少节点、字段错误或名称冲突时中止发布构建。六种系统与架构组合使用同一份通道节点数据，生成文件留在构建工作区。
-3. 主体程序直接从节点目录类填充「映射」页的线路下拉框，移除「加载节点」、文件选择器、`--nodes`、保存上次节点文件路径和 TOML 导入解析。保留节点选择及供 `frpc` 使用的临时配置生成。修改内置节点后，通过对应通道发新版下发。
+1. 为 `dev` 和 `stable` 使用对应的 GitHub Actions Environment。将公开节点配置写入环境变量 `MINECRAFTTOOLS_NODES_TOML`。签名私钥继续只在发布签名作业中使用。[GitHub Actions Environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
+2. 标签构建先保存一份通道目录供六个目标共用。打包脚本校验 TOML，再生成供主体程序导入的 Python 模块，按输入顺序保存不可变的 `Node` 列表。受控节点需要 `node_id` 和与 frps `allowPorts` 一致的端口区间。缺少节点、字段错误或名称冲突会中止构建。日常 CI 使用样例线路。
+3. 客户端启动时从内置目录填充「映射」页的线路下拉框，按所选节点的端口范围生成 frpc 临时配置。通过发布对应通道的新版本下发线路更新。
+
+GitHub Actions 的 `dev` 环境已配置独立香港线路，frps 地址为 `hk-1.mitahill.com:27002`，游戏端口为 `33001–33002`。macOS arm64 本地包已验证内置线路、普通 TCP 映射、大厅发布和封禁联动。`stable` 环境待配置。
 
 写入公开发布包的值可被用户提取，包括节点 token。任何必须保密的凭据只保存在 CI 或服务端。macOS Keychain 如用于导入 CI 签名证书，属于签名步骤。

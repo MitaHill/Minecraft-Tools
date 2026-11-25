@@ -4,11 +4,13 @@
 
 ## 当前客户端
 
-1. 解压对应系统和架构的压缩包，打开 MinecraftTools。客户端默认没有节点或大厅服务。
-2. 配好自己的 FRP 节点后，复制 [节点样例](client/nodes.example.toml)，填写节点地址、FRP 控制端口和所需 token，在「设置」中载入 TOML。节点配置了 `allowPorts` 时，可以用 `remote_port_start` 和 `remote_port_end` 同步限制客户端可选的远程端口。
-3. 在「映射」页选择线路和端口。映射成功后复制联机地址。设置 `MINECRAFTTOOLS_LOBBY_URL` 后可使用联机大厅。
+以下步骤适用于从当前源码构建的安装包。已发布的 `dev-2026-11-25-3` 仍在设置页载入节点 TOML。
 
-连接受控节点时，在节点 TOML 中填写 Control Server 登记的 `node_id` 和允许端口范围。由 Launcher 启动客户端时会传入 Control Server 地址。frpc 默认使用系统 CA 校验该节点，使用内部 CA 时填写 `tls_ca_file`。
+1. 使用对应系统和架构的安装包，从系统应用入口打开 MinecraftTools。
+2. 在「映射」页选择安装包内置的线路和端口。映射成功后复制联机地址。
+3. 从 Launcher 打开的客户端会自动访问总控制端的联机大厅。
+
+自建节点可以基于 [节点样例](client/nodes.example.toml) 生成安装包。连接受控节点时，在构建用 TOML 中填写 Control Server 登记的 `node_id` 和与 frps `allowPorts` 一致的远程端口范围。当前原型的 frpc 使用普通 TCP 连接 frps。
 
 `client/` 是桌面客户端，`server/` 是原 FastAPI 服务，`tools/admin/` 是独立管理工具。开发和发版见 [构建说明](docs/build.md)。
 
@@ -22,7 +24,7 @@
 
 客户端由主体程序和独立的 Launcher 组成，两者打进同一个安装包。Launcher 先检查网络和总控制端，再检查更新。`dev` 优先更新 dev，也可在没有更新的 dev 版本时安装更高版本的 stable。有更新就当次下载安装，随后启动主体程序。主体程序须在 30 秒内报告就绪，启动失败时保存诊断并自动上报。断网或总控制端连通测试失败时，Launcher 报错退出，不上传日志。这部分已经实现并纳入 CI：标签构建产出 MSI、DMG、`.run` 和更新包，并从安装入口冒烟。
 
-控制端 HTTPS 入口是 `https://ctl.mctools.mitahill.com`。主体程序仍从 TOML 载入节点，尚未改为构建时写入节点清单。Windows、Linux 的原生安装和 macOS 正式签名与公证仍需真机验收。设计和验收目标见 [客户端更新与节点构建计划](docs/client-release.md)。
+控制端 HTTPS 入口是 `https://ctl.mctools.mitahill.com`。发布版本使用对应通道的内置节点目录。各平台的复验范围和 macOS 正式签名与公证进度见 [客户端验收矩阵](docs/client-release.md#发布验收矩阵)。
 
 ## 许可证
 

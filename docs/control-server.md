@@ -89,7 +89,7 @@ Control Server 已实现 Launcher 接口、旧大厅和管理台登录及列表�
 
 ### 3.3 客户端与 Launcher
 
-- Launcher 只使用 `/health`、`/releases/{channel}.json`、`/diagnostics`。
+- Launcher 只使用 `/health`、`/releases/{channel}.json`、`/releases/artifacts/{channel}/<文件名>`、`/diagnostics`。
 - 主程序使用 `/api/v1` 注册隧道、轮询封禁状态、维护大厅房间。
 - frpc 使用稳定代理名和 metadata，便于节点和控制端关联隧道。
 - 封禁后客户端停止 frpc、取消大厅发布、显示原因。
@@ -214,8 +214,10 @@ PRAGMA foreign_keys=ON;
 | --- | --- | --- |
 | GET | `/health` | 当前返回 `200` 和 `{"status":"ok"}`，无需查库或鉴权，独立于大厅限流和黑名单 |
 | GET | `/releases/{channel}.json` | `channel` 为 `dev` 或 `stable`。从发布目录读取签名清单，清单缺失时返回 `503` |
-| GET | `/releases/artifacts/{filename}` | 按校验后的更新包文件名读取本地 `artifacts/`，支持 Range 请求 |
+| GET | `/releases/artifacts/{channel}/{filename}` | `channel` 为 `dev` 或 `stable`。按校验后的完整包文件名读取本地 `<channel>/artifacts/`，支持 Range 请求 |
 | POST | `/diagnostics` | 校验 Launcher 的启动失败报告，在线程池中写入 SQLite，事务提交后返回空响应 `201`，无效请求返回 `422` |
+
+发布目录布局是 `<release_dir>/<channel>.json` 和 `<release_dir>/<channel>/artifacts/<文件名>`。每个通道只保留最新版本的六个更新包、六个桌面压缩包和六个安装包；需要回退时按旧标签重新构建并发布。
 
 清单外层传输 `schema`、`key_id`、`payload`、`signature`。`payload` 是以下 JSON 原始字节的 Base64URL 编码。签名覆盖原始字节。
 
@@ -230,7 +232,7 @@ PRAGMA foreign_keys=ON;
       "version": "2026-01-02-1",
       "os": "darwin",
       "arch": "arm64",
-      "url": "https://example.com/downloads/MinecraftTools-update-2026-01-02-1-darwin-arm64.tar.gz",
+      "url": "https://ctl.mctools.mitahill.com/releases/artifacts/dev/MinecraftTools-update-2026-01-02-1-darwin-arm64.tar.gz",
       "size": 1048576,
       "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     }
@@ -268,13 +270,15 @@ GET  /api/v1/lobby/online
 ```json
 {
   "status": "blocked",
-  "reason": "no_minecraft_status",
+  "reason": "测试",
   "blocked_at": 1760000000,
   "last_scan_at": 1760000000
 }
 ```
 
 `status` 取值：`pending`、`active`、`block_pending`、`blocked`、`closed`、`offline`。客户端把 `block_pending` 和 `blocked` 都视为需要停止映射的状态。
+
+`reason` 是控制端下发给客户端直接展示的封禁文案。管理员封禁使用操作员填写的原因，扫描器等自动触发条件提供各自的文案；客户端原样展示（仅保留对历史 `no_minecraft_status` 记录的兼容）。当前扫描器自动封禁的文案为「测试」，后续按触发条件补充。
 
 客户端状态联动按以下顺序实现并验收。
 
@@ -296,7 +300,7 @@ GET  /api/v1/lobby/online
 | `POST /api/lobby/heartbeat` | 记录调用者的在线心跳，响应保留 `success`。 |
 | `GET /api/lobby/online` | 返回 `{"success": true, "online_count": n}`。沿用 15 秒在线窗口，`online_count` 保持整数。 |
 
-旧客户端的房间键为 `<remote_port>_<node_id>`，其中 `node_id` 是整数。Qt 客户端每 5 秒用同一份 `POST /rooms` 请求续期房间，`POST /heartbeat` 则用于大厅在线人数统计。已登记的地址和端口唯一匹配正在运行的隧道时，发布记录关联该隧道。当前兼容接口通过 `CONTROL_LOBBY_TARGETS` 限制可探测的目标，删除操作同时核对房间键和来源 IP。上线前需要核对实际反向代理的可信地址与旧客户端换网行为。
+旧客户端的房间键为 `<remote_port>_<node_id>`，其中 `node_id` 是整数。Qt 客户端每 5 秒用同一份 `POST /rooms` 请求续期房间。打开大厅时，客户端立即发送 `POST /heartbeat`，随后每 5 秒续报并刷新在线人数。离开大厅后停止续报，在线记录按来源 IP 去重并在 15 秒后过期。已登记的地址和端口唯一匹配正在运行的隧道时，发布记录关联该隧道。当前兼容接口通过 `CONTROL_LOBBY_TARGETS` 限制可探测的目标，删除操作同时核对房间键和来源 IP。上线前需要核对实际反向代理的可信地址与旧客户端换网行为。
 
 ### 6.4 节点协议
 
@@ -347,8 +351,7 @@ GET      /api/admin/audit
 客户端 frpc 配置：
 
 ```toml
-transport.tls.enable = true
-transport.tls.useSystemCa = true
+transport.tls.enable = false
 
 [[proxies]]
 name = "minecraft-<tunnel_id>"
@@ -360,7 +363,7 @@ metadatas.tunnel_id = "<tunnel_id>"
 metadatas.tunnel_proof = "<proof>"
 ```
 
-frp server plugin 的 `NewProxy` 请求包含 `User.RunID`、`ProxyName`、`RemotePort` 和代理级 `Metas`。Agent 只保存并上报 `claim_id`、`claim_hash`、`run_id`、`proxy_name` 与 `remote_port`。Control Server 根据已验证的节点与注册证明确认安装归属。实例使用内部 CA 时，客户端节点配置填写 `tls_ca_file`，frpc 使用该信任文件校验 frps。 [FRP v0.72.0 配置样例](https://github.com/fatedier/frp/blob/v0.72.0/conf/frpc_full_example.toml)
+frp server plugin 的 `NewProxy` 请求包含 `User.RunID`、`ProxyName`、`RemotePort` 和代理级 `Metas`。Agent 只保存并上报 `claim_id`、`claim_hash`、`run_id`、`proxy_name` 与 `remote_port`。Control Server 根据已验证的节点与注册证明确认安装归属。当前原型使用普通 TCP 连接 frps。 [FRP v0.72.0 配置样例](https://github.com/fatedier/frp/blob/v0.72.0/conf/frpc_full_example.toml)
 
 ### 7.2 兜底方式
 
@@ -420,7 +423,7 @@ frp server plugin 的 `NewProxy` 请求包含 `User.RunID`、`ProxyName`、`Remo
 | `circuit_breaker` | 20% | 一轮扫描失败率超过 20% 时暂停自动封禁并告警 |
 | `auto_unblock` | 关闭 | 默认人工解封；可配置连续成功后自动解封 |
 
-严格模式可以设 `failure_threshold=1`、`grace_period=0`，但误封会明显增加。产品文案可以写“未检测到 Minecraft MOTD，已封禁”，实现上仍按连续失败计数。
+严格模式可以设 `failure_threshold=1`、`grace_period=0`，但误封会明显增加。当前自动封禁返回给客户端的文案暂为「测试」，后续按触发条件补充；实现上仍按连续失败计数。
 
 ### 8.4 安全约束
 
@@ -476,7 +479,7 @@ agent 通过共享卷里的 Unix socket 调用 helper。第一版的 socket 用�
 ### 9.4 客户端通知与大厅
 
 - 客户端映射期间每 5 秒轮询 `GET /api/v1/tunnels/{id}/status`。
-- 收到 `block_pending` 或 `blocked` 后：停止 frpc、显示原因、调用 `DELETE /api/lobby/rooms`、禁用重新发布。
+- 收到 `block_pending` 或 `blocked` 后：停止 frpc、原样显示服务端返回的封禁文案、调用 `DELETE /api/lobby/rooms`、禁用重新发布。
 - 控制端在封禁事务中删除大厅房间，并从 `block_pending` 开始拒绝目标端口发布和续期，直至解封确认。客户端删除是幂等兜底。
 - 客户端想重新尝试时，先走“重新检测”或等待管理员解封；直接重启 frpc 会被 plugin 拒绝。
 
@@ -528,15 +531,35 @@ volumes:
 - 只跑一个 `control` 实例；不要水平扩容。
 - 反向代理负责 TLS 和静态 Vue 资源。
 - 反向代理应发送 `Host`、`X-Forwarded-Proto` 和客户端地址。设定 `CONTROL_TRUSTED_PROXIES` 为实际代理地址。宿主机代理经 Docker 端口映射访问时，以 Control Server 实际看到的 bridge 网关为准。
-- 控制端节点 Hub 9443 需要单独暴露给节点；可以让反向代理做 TLS 终止，也可以由 control 自己终止 TLS。
+- HTTPS Agent 通过反向代理访问节点 Hub。仍使用原生 TLS 的 Agent 走 Hub 的独立监听端口。
 
 #### Phoenix 入口和发布目录
 
 2026-11-25 起，Control Server 的 HTTPS 入口是 `https://ctl.mctools.mitahill.com`（A/AAAA 都指向 Phoenix）。宿主机系统 nginx 在 443 上终止 TLS，把 `/` 代理到 `127.0.0.1:18765`（Compose 中 control 容器发布的 8000 端口），并发送 `Host`、`X-Forwarded-For` 与 `X-Forwarded-Proto`。证书由 certbot 管理。旧 trial nginx 的 `mitahill.com:18443` 入口已经停用。
 
-节点 Hub 仍发布在 `us-6.mitahill.com:19443`，使用 SAN 只有 `us-6.mitahill.com` 的自签证书，香港节点继续按该地址连接。若以后让节点也使用新域名，需要重签带新 SAN 的 Hub 证书并更新节点配置。
+香港 dev Agent 使用 `CONTROL_URL=https://ctl.mctools.mitahill.com:443`，并将 `CONTROL_CA_FILE` 设为空，使用系统信任库验证 nginx 的服务端证书。它在 `/api/v1/node/connect` 通过 HTTPS 升级为 WebSocket，沿用节点 secret 和原有消息格式。Control Server 设置 `CONTROL_NODE_HUB_HTTPS=1`，并在 nginx 的该路径转发 WebSocket 升级头。Phoenix 当前 Compose 部署通过 `control/node-https.yaml` 覆盖镜像和该环境变量，重建控制端时需把此文件加入现有的 `-f` 参数。
 
-发布清单目录在宿主机 `/srv/minecrafttools-integration/tls-node-trial/releases`，通过 [发布卷覆盖配置](../control/compose.releases.yaml) 只读挂载为 `/run/releases`，容器内 `CONTROL_RELEASE_DIR=/run/releases`。CI 的 `ssh-publish` 作业用 SFTP 先写临时文件再改名，原子替换对应通道的 `dev.json` 或 `stable.json`。
+```nginx
+location = /api/v1/node/connect {
+    proxy_pass http://127.0.0.1:18765;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+旧 Agent 仍可连接 `tls://us-6.mitahill.com:19443`，并使用其原有 CA 配置。HTTPS 节点入口使用服务端证书和节点 secret。启用节点客户端 CA 的 Hub 继续使用独立的 mTLS 监听。
+
+#### 节点 mTLS 与证书轮换
+
+在 Hub 的 TLS 挂载目录添加节点客户端 CA，设置 `CONTROL_NODE_HUB_CLIENT_CA=/run/control-tls/node-clients-ca.pem`。启用后 Hub 要求客户端证书链通过校验，证书须使用 `clientAuth`，并包含唯一的 URI SAN `urn:minecrafttools:node:<node_id>`。Hub 仍核对原有的节点 secret。滚动接入时先为各 Agent 配置凭据，再启用 Hub 的客户端证书校验。
+
+Agent 使用 `CONTROL_CLIENT_CERT_FILE` 与 `CONTROL_CLIENT_KEY_FILE` 读取只读挂载中的证书和私钥，两个变量成对配置。轮换时并行签发同一节点身份的新证书，先部署新证书和私钥，再让 Agent 重连，确认快照、心跳和命令 ACK。Agent 在新 TLS 握手时会重读证书和私钥。轮换成功后撤销旧证书，用 `CONTROL_NODE_HUB_CLIENT_CRL=/run/control-tls/node-clients.crl.pem` 配置签名 CRL，并重启隔离 Control Server 以加载新的信任配置。轮换 CA 时先部署可验证新旧链的 CA 及对应的 CRL，再逐个迁移节点。
+
+发布目录在宿主机 `/srv/minecrafttools-integration/tls-node-trial/releases`，通过 [发布卷覆盖配置](../control/compose.releases.yaml) 只读挂载为 `/run/releases`，容器内 `CONTROL_RELEASE_DIR=/run/releases`。CI 的 `ssh-publish` 作业把该通道的发布文件传到 `<channel>/artifacts/`，在服务器上核对 SHA-256 后，用 SFTP 先写临时文件再改名，原子替换对应通道的 `dev.json` 或 `stable.json`，最后删除该通道旧版本的文件。
 
 ### 10.2 节点端 Compose
 
@@ -588,7 +611,8 @@ services:
         restart: true
     cap_drop: [ALL]
     environment:
-      CONTROL_URL: tls://control.example.com:9443
+      CONTROL_URL: https://ctl.mctools.mitahill.com:443
+      CONTROL_CA_FILE: ""
       NODE_ID: node-xxx
       FRPS_ADMIN_URL: http://node-net:7400
       PLUGIN_LISTEN: 0.0.0.0:9000
@@ -653,7 +677,7 @@ ops = ["Login", "NewProxy", "CloseProxy", "NewUserConn"]
 - `node-net` 是共享命名空间在 bridge 上的 DNS 名。agent 通过 `node-net:7400` 读管理状态，frps 通过 `agent:9000` 调插件，双方端口都留在 bridge 内。
 - `frps.toml` 含 FRP 凭据。在宿主机将文件设置为 `root:10001`、权限 `0640`，以只读方式挂载给使用 UID/GID `10001` 的 frps。
 - `allowPorts`、agent 的白名单、helper 的操作范围和客户端节点配置使用同一游戏端口范围。IPv6 节点配置 `proxyBindAddr = "::"`，并独立验证 Docker bridge 与公网 IPv6 发布。
-- 受控线路在节点端加载 [frps TLS Compose 配置](../node/compose.frps-tls.yaml)，使用 `FRPS_TLS_DIRECTORY` 只读挂载证书和私钥。`frps.toml` 设定 `transport.tls.force = true`、`transport.tls.certFile = "/run/frps-tls/cert.pem"` 和 `transport.tls.keyFile = "/run/frps-tls/key.pem"`。证书 SAN 与客户端 `server_addr` 一致，frps 的 UID/GID `10001` 可读。
+- 原型的 frps 接受普通 TCP。Agent 到控制端 Hub 使用独立的 TLS 连接。
 - `transport.tcpMux` 保持默认。端口封禁只涉及玩家连接的 socket，FRP 控制连接继续运行。
 
 ### 10.3 前置条件
@@ -733,6 +757,7 @@ ops = ["Login", "NewProxy", "CloseProxy", "NewUserConn"]
 | 本地工作区 | 开发与第一轮验收 | 用临时 SQLite、Launcher 安装状态和 FRP 测试配置，先验证新库和已有库迁移，再运行接口、桌面和容器测试。 |
 | Phoenix | Control Server 联调 | Compose 项目 `minecrafttools-integration`，应用目录 `/srv/minecrafttools-integration/tls-node-trial/control`，SQLite 卷 `minecrafttools-integration_control-data`。HTTPS 入口为 `https://ctl.mctools.mitahill.com`，发布目录为 `/srv/minecrafttools-integration/tls-node-trial/releases`。 |
 | 香港节点（伤心云 Lite-Lv1） | FRP Agent 与公网隧道联调 | 使用独立的 Compose 项目、bridge、封禁状态卷和一段经盘点确认空闲的测试端口。agent 通过 `tls://us-6.mitahill.com:19443` 主动连到 Phoenix。 |
+| 香港 dev 线路 | 开发通道的内置线路 | Compose 项目 `minecrafttools-hk-dev`，节点 ID 为 `hk-dev`。Agent 连接 `https://ctl.mctools.mitahill.com:443`。frps 接收 `hk-1.mitahill.com:27002` 的普通 TCP 连接，Phoenix 大厅允许 `33001–33002` 两个游戏端口。 |
 
 - 部署前记录两台机器的系统、监听端口、Docker 版本与已有服务。本地通过后才部署相同构建。在测试实例之间配置节点凭据与 TLS；连接参数和凭据在仓库外提供。
 - 按顺序验收旧大厅和 Launcher 回归、Control Server 容器和数据库恢复、管理台权限、Agent 注册和快照、手动封禁与解封、自动扫描与大厅下线。公网节点验证两个独立隧道，并在持有连接时测试目标端口断开、另一端口继续传输和重启后的恢复。
@@ -747,6 +772,12 @@ ops = ["Login", "NewProxy", "CloseProxy", "NewUserConn"]
 3. **在本地 Docker 验证加固。** 节点 Hub 要求受信任且可绑定节点身份的客户端证书，验证无证书、错误身份和旧证书被拒绝。验证轮换期间仍能回报快照和命令 ACK，审计记录可追溯，限流后仍能完成节点重连。用 SQLite 备份还原到隔离实例，校验完整性、迁移版本、封禁状态和 API。
 4. **在 Phoenix 和香港节点复验。** 保留联调配置和数据卷备份，部署本地已通过的同一构建。香港独立 Compose 项目使用两条公网测试隧道，覆盖手动和自动封禁、已有连接、节点容器重启和 `node-net` 重建。持续探测封禁端口无业务数据通过，并验证另一路在 frpc 重连后恢复。Docker daemon 重启前盘点同机服务，如会影响同机业务，使用独立 Docker daemon 验证该场景。
 5. **发布 stable。** 汇总格式、静态检查、单元与集成测试、桌面验收及公网联调。验收通过后，先上传并核验版本文件，再切换 `stable.json`，最后从已安装的客户端验证可见和可更新。
+
+2026-11-26 在独立 Colima Docker 环境运行了镜像 CI 发布的 Control Server `2026-11-25-3`。空库迁移到 `0006_install_claims`，SQLite 完整性检查通过。健康检查、两个签名清单和大厅查询返回 200，合法诊断返回 201 并落库。同期使用 macOS arm64 CI 的 DMG 连接该本地服务，Launcher 从安装包启动主体，收到 `READY` 后写入版本状态。
+
+同日从本地测试构建向 Phoeix 和香港分别加载 amd64 镜像，核对镜像层与本地一致，在独立 Compose 项目验证 mTLS 和公网双隧道。手动封禁关闭目标端口原有连接，第二条隧道仍可传输。重建香港 `node-net` 后持续探测未收到封禁端口的数据，另一路在 frpc 重连后恢复，解封后目标重新接入。随后替换节点证书、加载 CRL 并重启联调 Control Server，旧证书被拒绝，Agent 进程未重启并用新证书恢复在线。两台宿主机上的现有项目保留运行。
+
+联调 SQLite 通过在线备份导出。在本地独立容器还原后，完整性检查通过，已有隧道和封禁命令保留，迁移到 `0007_admin_audit` 并确认审计写入。审计记录包含时间、操作者、操作与目标，随登录、退出、登记节点、重扫及封禁命令事务写入 `audit_logs`。已有命令的幂等重试沿用原审计记录。
 
 ### Phase 1：控制端骨架
 

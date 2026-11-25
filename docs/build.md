@@ -17,11 +17,10 @@
 
 ```sh
 ./dev.sh uv run --project client --no-sync python client/scripts/fetch_frpc.py --os darwin --arch arm64 --output /tmp/minecrafttools-build/frp
-./dev.sh uv run --project client --no-sync python -m minecrafttools --frpc /tmp/minecrafttools-build/frp/frpc
 ./dev.sh uv run --project client --no-sync python client/scripts/build.py --frpc /tmp/minecrafttools-build/frp/frpc --version local
 ```
 
-产物在 `/tmp/minecrafttools-build/dist/artifacts/`，文件名以 `MinecraftTools-` 开头。不经过 `dev.sh` 直接运行 `build.py` 时仍写回 `client/dist/`，可以用 `MINECRAFTTOOLS_DIST_DIR` 和 `MINECRAFTTOOLS_WORK_DIR` 改到项目外。本机节点配置可存为 `client/nodes.local.toml`，用「设置」或 `--nodes` 载入。含 token 的文件只留本地。配置大厅服务时，设置 `MINECRAFTTOOLS_LOBBY_URL` 为服务的 `/api/lobby` 地址。
+产物在 `/tmp/minecrafttools-build/dist/artifacts/`，文件名以 `MinecraftTools-` 开头。不经过 `dev.sh` 直接运行 `build.py` 时仍写回 `client/dist/`，可以用 `MINECRAFTTOOLS_DIST_DIR` 和 `MINECRAFTTOOLS_WORK_DIR` 改到项目外。默认本地构建内置样例线路，也可以在命令末尾加 `--nodes-file client/nodes.local.toml` 打包自定义节点。配置大厅服务时，设置 `MINECRAFTTOOLS_LOBBY_URL` 为服务的 `/api/lobby` 地址。
 
 ## GitHub Actions 发布
 
@@ -37,17 +36,19 @@ GitHub Actions 在 Windows、macOS 和 Linux 上分别构建 amd64 和 arm64。�
 
 签名清单的有效期是 365 天。空的通道也发布已签名清单；一年内没有新版本时需要手动重签。macOS 安装包暂用 ad-hoc 签名，Windows 安装包未做 Authenticode；正式签名和公证需要另外的凭据素材。
 
-控制端入口是 `https://ctl.mctools.mitahill.com`（Phoenix），节点 Hub 仍使用 `us-6.mitahill.com:19443`。Control Server 的部署与入口拓扑见[控制端联调环境](control-server.md#13-分阶段实施)。
+日期标签构建需要预先在 GitHub 的 `dev` 与 `stable` Environment 配置变量 `MINECRAFTTOOLS_NODES_TOML`，用 [节点样例](../client/nodes.example.toml) 的格式填写只含可公开发布字段的目录。一次发布先把选定通道的目录上传为本次运行的产物，再由六个构建作业使用同一份输入。[GitHub Actions 变量上下文](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#vars-context)
+
+控制端和香港 dev Agent 都使用 `https://ctl.mctools.mitahill.com`（Phoenix）。旧 Agent 的原生 TLS 入口为 `us-6.mitahill.com:19443`。Control Server 的部署与入口拓扑见[控制端联调环境](control-server.md#13-分阶段实施)。
 
 ### 构建期写入 Launcher
 
-构建发布用 Launcher 时，`MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS` 是编译期 JSON 对象，键名为签名密钥 ID，值为 32 字节 Ed25519 公钥的无填充 Base64URL。`MINECRAFTTOOLS_CONTROL_URL` 内置 HTTPS 地址，安装后的 Launcher 不再需要命令行参数。两个变量都是仓库 Variables，六个平台共用；`MINECRAFTTOOLS_RELEASE_KEY_ID` 指定当前 key id。
+构建发布用 Launcher 时，`MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS` 是编译期 JSON 对象，键名为签名密钥 ID，值为 32 字节 Ed25519 公钥的无填充 Base64URL。`MINECRAFTTOOLS_CONTROL_URL` 内置 HTTPS 地址，安装后的 Launcher 不再需要命令行参数；发布作业也用它拼接更新包 URL。两个变量都是仓库 Variables，六个平台共用；`MINECRAFTTOOLS_RELEASE_KEY_ID` 指定当前 key id。
 
 `release-signing` 环境提供私钥 `RELEASE_SIGNING_KEY_PEM`，发布作业用它签名清单，并核对私钥公钥与 `MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS` 一致。标签构建缺少任一变量时，`prepare` 作业直接失败，避免产出装好即报错的安装包。
 
 标签构建时用于验证签名的公钥只来自仓库 Variables；本机 `release-signing.pem` 是唯一私钥副本，需单独备份。
 
-启用仓库变量 `MINECRAFTTOOLS_PUBLISH_MANIFEST=true` 后，发布工作流在 GitHub Release 创建成功后，通过 `ssh-publish` 把已签名清单写入 `DEPLOY_SSH_DIRECTORY` 并原子切换对应通道。Control Server 通过 [发布卷覆盖配置](../control/compose.releases.yaml) 只读挂载该目录，当前路径是 `/srv/minecrafttools-integration/tls-node-trial/releases`。
+启用仓库变量 `MINECRAFTTOOLS_PUBLISH_MANIFEST=true` 后，发布工作流在 GitHub Release 创建成功后，通过 `ssh-publish` 把该通道的 18 个发布文件（6 个更新包、6 个桌面压缩包、6 个安装包）上传到 `DEPLOY_SSH_DIRECTORY/<channel>/artifacts/`，在服务器上核对 SHA-256，最后才原子切换 `DEPLOY_SSH_DIRECTORY/<channel>.json`，再删除该通道旧版本的文件。清单里的更新包 URL 指向 `MINECRAFTTOOLS_CONTROL_URL/releases/artifacts/<channel>/<文件名>`，Launcher 因此从 Control Server 下载全部更新内容。GitHub Release 保留同样的 18 个资产，只作归档和手动安装来源。Control Server 通过 [发布卷覆盖配置](../control/compose.releases.yaml) 只读挂载该目录，当前路径是 `/srv/minecrafttools-integration/tls-node-trial/releases`。
 
 ### 发布环境与凭据
 
@@ -59,7 +60,7 @@ GitHub Actions 在 Windows、macOS 和 Linux 上分别构建 amd64 和 arm64。�
 | 仓库 | Variable | `MINECRAFTTOOLS_RELEASE_KEY_ID` | 已配置为 `release-2026-11`。 |
 | 仓库 | Variable | `MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS` | 已配置，构建期写入 Launcher 的公钥映射。 |
 | 仓库 | Variable | `MINECRAFTTOOLS_CONTROL_URL` | 已配置为 `https://ctl.mctools.mitahill.com`。 |
-| 仓库 | Variable | `MINECRAFTTOOLS_PUBLISH_MANIFEST` | 已启用，Release 创建后推送签名清单。 |
+| 仓库 | Variable | `MINECRAFTTOOLS_PUBLISH_MANIFEST` | 已启用，Release 创建后上传发布文件并切换签名清单。 |
 | `dockerhub-publish` | Secret | `DOCKERHUB_TOKEN` | 已配置，允许登录 Docker Hub 并推送镜像。当前令牌于 2027-02-23 到期。 |
 | `dockerhub-publish` | Variable | `DOCKERHUB_USERNAME` | 已配置，Docker Hub 登录名。 |
 | `dockerhub-publish` | Variable | `DOCKERHUB_NAMESPACE` | 已配置为 `kindmitaishere`。 |
@@ -82,6 +83,23 @@ kindmitaishere/minecrafttools-frp-agent:2026-11-25-1
 ```
 
 每个镜像都包含 `linux/amd64` 与 `linux/arm64`，推送后用 `docker buildx imagetools inspect` 校验两个平台。`main` 分支和 `control/**`、`node/**` 的 PR 只做单平台构建，不推送，用来提前发现 Dockerfile 破损。正式版 Git 标签 `yyyy-mm-dd-n` 直接用作镜像标签。dev 的 Git 标签 `dev-yyyy-mm-dd-n` 去掉 `dev-` 后用作镜像标签。两个通道共享当天的发布序号，避免不同构建占用同一个镜像标签。
+
+### 新工作流推送与构建交接（2026-11-26）
+
+待接手人推送新版 `.github/workflows/client.yml` 并在远程触发新一轮构建。当前远程 `main` 为 `8b81b22`。已触发的桌面 CI 和容器 CI 都使用该提交。关联的本地变更还包括支持 `--nodes-file` 的 `client/scripts/build.py` 和客户端节点目录实现。新版清单引用 Phoenix 下载地址，Control Server 因此也需要包含 `control/app/main.py` 的发布文件路由及配套测试。提交前核对这些依赖所在的改动，并排除本地节点配置和凭据。[旧版桌面 CI](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45674522427) · [旧版容器 CI](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45674524187)
+
+1. 将新版工作流及配套变更推到 `origin/main`。推送会触发 `Client build` 和 `Container images`。如需手动触发新的分支构建，使用下列命令。核对两个运行的 `headSha` 都是刚推送的提交，并检查六平台桌面作业、Control Server 和 FRP Agent 测试、lint 及两个容器镜像构建。分支构建将 Main App 和 Launcher 分开上传到 GitHub Actions。
+
+   ```sh
+   gh workflow run client.yml --repo MitaHill/Minecraft-Tools --ref main
+   gh workflow run images.yml --repo MitaHill/Minecraft-Tools --ref main
+   ```
+
+2. 需要一体安装包和 Phoenix 上传时，在新的已验证提交上推送下一个未使用的 `dev-yyyy-mm-dd-n` 标签。先确认 `dev` 环境已有 `MINECRAFTTOOLS_NODES_TOML`，签名和 SSH 发布配置可用，且 Phoenix 上的 Control Server 支持 `/releases/artifacts/dev/<文件名>` 并挂载 CI 使用的发布目录。标签推送会生成 GitHub 预发布、推送双架构镜像，并在启用 `MINECRAFTTOOLS_PUBLISH_MANIFEST` 时通过 SSH/SFTP 更新 Phoenix 的 dev 通道。
+3. 确认六个安装作业都通过安装、从 Launcher 启动和 Main App `READY` 检查，且 `release` 与 `deploy-release` 成功。从同一 GitHub 预发布下载 Windows AMD64 的 `MinecraftTools-<版本>-windows-amd64.msi` 和 macOS ARM64 的 `MinecraftTools-<版本>-darwin-arm64.dmg`，按 `SHA256SUMS` 校验。每个安装包都包含 Launcher 和 Main App。
+4. 核对 Phoenix 的 `dev/artifacts/` 收到 18 个发布文件，`/releases/dev.json` 指向本次版本，并从清单中实际下载 Windows AMD64 与 macOS ARM64 的更新包，核对大小和 SHA-256。把新提交、相关 Actions 运行链接、预发布链接和验收结果回填到这段交接记录。
+
+当前 Control Server 的文件名校验会拒绝两个 Linux 桌面 `.tar.gz`。它们会随发布上传，也可以从 GitHub 预发布下载。若要让这两个压缩包也能从 Phoenix 下载，需先补齐发布文件路由的文件名规则和测试。
 
 ## 大厅服务和管理工具
 

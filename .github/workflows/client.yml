@@ -115,8 +115,31 @@ jobs:
         run: go test ./...
         working-directory: node
 
-  build:
+  release-nodes:
     needs: prepare
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    environment: ${{ needs.prepare.outputs.channel }}
+    steps:
+      - name: Record the published node catalog
+        env:
+          MINECRAFTTOOLS_NODES_TOML: ${{ vars.MINECRAFTTOOLS_NODES_TOML }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MINECRAFTTOOLS_NODES_TOML" ]]; then
+            echo "::error::Set MINECRAFTTOOLS_NODES_TOML in the release channel environment."
+            exit 1
+          fi
+          printf '%s\n' "$MINECRAFTTOOLS_NODES_TOML" > "$RUNNER_TEMP/release-nodes.toml"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-nodes
+          path: ${{ runner.temp }}/release-nodes.toml
+          if-no-files-found: error
+
+  build:
+    needs: [prepare, release-nodes]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.release-nodes.result == 'success' || needs.release-nodes.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
     name: ${{ matrix.system }} / ${{ matrix.arch }}
     strategy:
@@ -172,9 +195,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: uv run --project client --no-sync python client/scripts/fetch_frpc.py --tag "$FRP_TAG" --os "$TARGET_OS" --arch "$TARGET_ARCH" --output client/build/frp
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: github.ref_type == 'tag'
+        with:
+          name: release-nodes
+          path: ${{ runner.temp }}/release-nodes
       - name: Package and smoke test
         shell: bash
-        run: uv run --project client --no-sync python client/scripts/build.py --frpc "$FRPC" --version "$BUILD_VERSION"
+        env:
+          NODE_CATALOG_DIR: ${{ runner.temp }}/release-nodes
+        run: |
+          set -euo pipefail
+          node_args=()
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            node_args=(--nodes-file "$NODE_CATALOG_DIR/release-nodes.toml")
+          fi
+          uv run --project client --no-sync python client/scripts/build.py --frpc "$FRPC" --version "$BUILD_VERSION" "${node_args[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: minecrafttools-${{ matrix.system }}-${{ matrix.arch }}
@@ -345,6 +381,7 @@ jobs:
           RELEASE_SIGNING_KEY_PEM: ${{ secrets.RELEASE_SIGNING_KEY_PEM }}
           RELEASE_KEY_ID: ${{ vars.MINECRAFTTOOLS_RELEASE_KEY_ID }}
           RELEASE_PUBLIC_KEYS: ${{ vars.MINECRAFTTOOLS_RELEASE_PUBLIC_KEYS }}
+          CONTROL_URL: ${{ vars.MINECRAFTTOOLS_CONTROL_URL }}
         run: |
           set -euo pipefail
           umask 077
@@ -365,7 +402,7 @@ jobs:
           updates=(artifacts/MinecraftTools-update-*.tar.gz)
           [[ "${#updates[@]}" -eq 6 ]]
           python3 control/scripts/sign_releases.py --channel "$RELEASE_CHANNEL" \
-            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
+            --base-url "${CONTROL_URL%/}/releases/artifacts/$RELEASE_CHANNEL" \
             --key-id "$RELEASE_KEY_ID" --private-key "$key" --output artifacts \
             --hours 8760 --matrix-version "$RELEASE_VERSION" "${updates[@]}"
       - name: Publish GitHub Release
@@ -394,7 +431,7 @@ jobs:
           path: artifacts/${{ needs.prepare.outputs.channel }}.json
           if-no-files-found: error
 
-  deploy-manifest:
+  deploy-release:
     if: vars.MINECRAFTTOOLS_PUBLISH_MANIFEST == 'true'
     needs: [prepare, release]
     runs-on: ubuntu-24.04
@@ -402,12 +439,23 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
+          pattern: minecrafttools-*
+          merge-multiple: true
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
           name: signed-channel-manifest
           path: manifest
-      - name: Publish channel manifest to Control Server
+      - name: Publish release to Control Server
         shell: bash
         env:
           RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           SFTP_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           SFTP_HOST: ${{ vars.DEPLOY_SSH_HOST }}
           SFTP_PORT: ${{ vars.DEPLOY_SSH_PORT }}
@@ -419,16 +467,51 @@ jobs:
           [[ "$RELEASE_CHANNEL" == stable || "$RELEASE_CHANNEL" == dev ]]
           [[ "$SFTP_DIRECTORY" =~ ^/[a-zA-Z0-9_./-]+$ && "$SFTP_DIRECTORY" != *..* ]]
           [[ "$SFTP_HOST" =~ ^[a-zA-Z0-9.-]+$ && "$SFTP_PORT" =~ ^[0-9]+$ && "$SFTP_USER" =~ ^[a-zA-Z0-9_-]+$ ]]
+
+          shopt -s nullglob
+          assets=(assets/MinecraftTools-*.zip assets/MinecraftTools-*.tar.gz assets/MinecraftTools-*.msi assets/MinecraftTools-*.dmg assets/MinecraftTools-*.run)
+          [[ "${#assets[@]}" -eq 18 ]]
+          for asset in "${assets[@]}"; do
+            [[ "${asset##*/}" == *"-$RELEASE_VERSION-"* ]]
+          done
+          (cd assets && sha256sum MinecraftTools-*.zip MinecraftTools-*.tar.gz MinecraftTools-*.msi MinecraftTools-*.dmg MinecraftTools-*.run > SHA256SUMS)
+
           umask 077
           scratch=$(mktemp -d)
           trap 'rm -rf "$scratch"' EXIT
           printf '%s\n' "$SFTP_KEY" > "$scratch/key"
           printf '%s\n' "$SFTP_KNOWN_HOSTS" > "$scratch/known_hosts"
           unset SFTP_KEY
+          sftp_opts=(-i "$scratch/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$scratch/known_hosts" -P "$SFTP_PORT")
+          ssh_opts=(-i "$scratch/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$scratch/known_hosts" -p "$SFTP_PORT")
+
+          channel_dir="$SFTP_DIRECTORY/$RELEASE_CHANNEL"
+          artifacts_dir="$channel_dir/artifacts"
+          staging="$channel_dir/.staging-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           pending="$SFTP_DIRECTORY/.$RELEASE_CHANNEL-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
-          sftp -b - -P "$SFTP_PORT" -i "$scratch/key" -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$scratch/known_hosts" -- "$SFTP_USER@$SFTP_HOST" <<EOF
+
+          ssh "${ssh_opts[@]}" -- "$SFTP_USER@$SFTP_HOST" \
+            "if [ -d '$channel_dir' ]; then find '$channel_dir' -maxdepth 1 -type d -name '.staging-*' -mtime +1 -exec rm -rf -- {} +; fi"
+
+          {
+            printf '%s\n' "-mkdir $channel_dir" "-mkdir $artifacts_dir" "-mkdir $staging" \
+              "chmod 755 $channel_dir" "chmod 755 $artifacts_dir" "chmod 755 $staging"
+            for asset in "${assets[@]}" assets/SHA256SUMS; do
+              printf 'put %s %s/%s\n' "$asset" "$staging" "${asset##*/}"
+            done
+          } | sftp -b - "${sftp_opts[@]}" -- "$SFTP_USER@$SFTP_HOST"
+
+          ssh "${ssh_opts[@]}" -- "$SFTP_USER@$SFTP_HOST" \
+            "cd '$staging' && sha256sum -c SHA256SUMS"
+
+          ssh "${ssh_opts[@]}" -- "$SFTP_USER@$SFTP_HOST" \
+            "cd '$staging' && mv -f -- MinecraftTools-* SHA256SUMS '$artifacts_dir/' && rmdir '$staging' && find '$artifacts_dir' -maxdepth 1 -type f -exec chmod 644 -- {} +"
+
+          sftp -b - "${sftp_opts[@]}" -- "$SFTP_USER@$SFTP_HOST" <<EOF
           put manifest/$RELEASE_CHANNEL.json $pending
           chmod 644 $pending
           rename $pending $SFTP_DIRECTORY/$RELEASE_CHANNEL.json
           EOF
+
+          ssh "${ssh_opts[@]}" -- "$SFTP_USER@$SFTP_HOST" \
+            "find '$artifacts_dir' -maxdepth 1 -type f ! -name '*-$RELEASE_VERSION-*' -delete"
