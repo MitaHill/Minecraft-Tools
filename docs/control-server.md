@@ -242,6 +242,7 @@ PRAGMA foreign_keys=ON;
 
 - `version` 必须是 `yyyy-mm-dd-n`，不能把 `dev-yyyy-mm-dd-n` 标签直接写入。
 - `os` 用 `darwin`/`windows`/`linux`，`arch` 用 `amd64`/`arm64`。
+- 发布作业把清单有效期签成 365 天；空的通道也提供同样有效期的已签名清单，一年内没有新版本时需要手动重签。
 - 诊断记录的 `os` 和 `arch` 列使用发布平台命名。现有实现把 `macos` 转为 `darwin`，`aarch64` 转为 `arm64`，`x86_64` 转为 `amd64`。`report` JSON 保留 Launcher 发送的原值。
 - `/diagnostics` 不要复用 `/api/report_violation` 的自动封 IP 语义。
 - `/health` 不要套大厅的 60 次/分钟自动封禁中间件。
@@ -529,6 +530,14 @@ volumes:
 - 反向代理应发送 `Host`、`X-Forwarded-Proto` 和客户端地址。设定 `CONTROL_TRUSTED_PROXIES` 为实际代理地址。宿主机代理经 Docker 端口映射访问时，以 Control Server 实际看到的 bridge 网关为准。
 - 控制端节点 Hub 9443 需要单独暴露给节点；可以让反向代理做 TLS 终止，也可以由 control 自己终止 TLS。
 
+#### Phoenix 入口和发布目录
+
+2026-11-25 起，Control Server 的 HTTPS 入口是 `https://ctl.mctools.mitahill.com`（A/AAAA 都指向 Phoenix）。宿主机系统 nginx 在 443 上终止 TLS，把 `/` 代理到 `127.0.0.1:18765`（Compose 中 control 容器发布的 8000 端口），并发送 `Host`、`X-Forwarded-For` 与 `X-Forwarded-Proto`。证书由 certbot 管理。旧 trial nginx 的 `mitahill.com:18443` 入口已经停用。
+
+节点 Hub 仍发布在 `us-6.mitahill.com:19443`，使用 SAN 只有 `us-6.mitahill.com` 的自签证书，香港节点继续按该地址连接。若以后让节点也使用新域名，需要重签带新 SAN 的 Hub 证书并更新节点配置。
+
+发布清单目录在宿主机 `/srv/minecrafttools-integration/tls-node-trial/releases`，通过 [发布卷覆盖配置](../control/compose.releases.yaml) 只读挂载为 `/run/releases`，容器内 `CONTROL_RELEASE_DIR=/run/releases`。CI 的 `ssh-publish` 作业用 SFTP 先写临时文件再改名，原子替换对应通道的 `dev.json` 或 `stable.json`。
+
 ### 10.2 节点端 Compose
 
 实际部署使用 [节点 Compose](../node/compose.yaml)。`firewall-helper`、`firewall-health` 和 `agent` 由 `node/` 镜像提供。以下示例展示网络拓扑。本地网络验证使用了等价的 Docker CLI 网络参数，见[封锁验证](#122-真实-frp-测试)。
@@ -722,8 +731,8 @@ ops = ["Login", "NewProxy", "CloseProxy", "NewUserConn"]
 | 环境 | 用途 | 数据与入口 |
 | --- | --- | --- |
 | 本地工作区 | 开发与第一轮验收 | 用临时 SQLite、Launcher 安装状态和 FRP 测试配置，先验证新库和已有库迁移，再运行接口、桌面和容器测试。 |
-| Phoenix | Control Server 联调 | 使用独立的 Compose 项目、应用目录、SQLite 卷和测试入口。在可访问的 HTTPS 入口验证 Launcher、大厅、管理台和节点连接。 |
-| 香港节点（伤心云 Lite-Lv1） | FRP Agent 与公网隧道联调 | 使用独立的 Compose 项目、bridge、封禁状态卷和一段经盘点确认空闲的测试端口。agent 主动连到 Phoenix。 |
+| Phoenix | Control Server 联调 | Compose 项目 `minecrafttools-integration`，应用目录 `/srv/minecrafttools-integration/tls-node-trial/control`，SQLite 卷 `minecrafttools-integration_control-data`。HTTPS 入口为 `https://ctl.mctools.mitahill.com`，发布目录为 `/srv/minecrafttools-integration/tls-node-trial/releases`。 |
+| 香港节点（伤心云 Lite-Lv1） | FRP Agent 与公网隧道联调 | 使用独立的 Compose 项目、bridge、封禁状态卷和一段经盘点确认空闲的测试端口。agent 通过 `tls://us-6.mitahill.com:19443` 主动连到 Phoenix。 |
 
 - 部署前记录两台机器的系统、监听端口、Docker 版本与已有服务。本地通过后才部署相同构建。在测试实例之间配置节点凭据与 TLS；连接参数和凭据在仓库外提供。
 - 按顺序验收旧大厅和 Launcher 回归、Control Server 容器和数据库恢复、管理台权限、Agent 注册和快照、手动封禁与解封、自动扫描与大厅下线。公网节点验证两个独立隧道，并在持有连接时测试目标端口断开、另一端口继续传输和重启后的恢复。

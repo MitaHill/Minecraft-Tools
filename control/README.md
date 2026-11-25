@@ -2,6 +2,8 @@
 
 Control Server 实现 [Launcher API](../docs/control-server.md#61-launcher-兼容-api根路径必须与-launcher-完全一致)。`dev` 和 `stable` 从发布目录读取签名清单。服务启动时运行 Alembic 迁移，诊断写入 SQLite 后返回 `201`。原报告保存在 `report`，`os` 和 `arch` 两列用于按平台查询。
 
+联调入口是 `https://ctl.mctools.mitahill.com`（Phoenix）。宿主机 nginx 终止 TLS 后代理到 control 容器，节点 Hub 仍使用 `us-6.mitahill.com:19443`。发布清单位于宿主机 `/srv/minecrafttools-integration/tls-node-trial/releases`，通过 `compose.releases.yaml` 只读挂载。
+
 ## 启动服务
 
 在仓库根目录执行。数据和虚拟环境使用独立的临时目录，服务只监听本机。

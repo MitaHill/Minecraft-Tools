@@ -14,7 +14,7 @@
 
 备份里还有两条独立路径。`src_updater/main.py` 接收已下载的新 EXE，等待旧进程和文件锁，尝试备份、替换、失败回滚和重启，使用 PySide6 和 `psutil`。`src_updater/launcher.py` 是另一套 PySide6 启动器，会从单条版本记录检查并下载 Windows EXE，用户确认后直接覆盖并启动。这两个入口均未进入当前仓库的六平台构建。
 
-当前仓库已有独立 Launcher 原型，桌面 CI 生成的客户端压缩包尚未组装 Launcher。现有 CI 中的 `fetch_frpc.py` 用于构建阶段获取上游 `frpc`。
+当前仓库的 Launcher 已随桌面安装包一起分发：CI 用 `client/scripts/package_desktop.py` 把 Launcher、Main App 更新包和 bootstrap 元数据打进 MSI、DMG 或 `.run`。现有 CI 中的 `fetch_frpc.py` 用于构建阶段获取上游 `frpc`。
 
 ## 主体程序和小型更新器
 
@@ -102,15 +102,15 @@ Launcher 用一个无边框窗口显示现有开屏图，窗口随实际启动�
 
 ### CI/CD 与桌面安装包
 
-PR 和 `main` 构建并测试四个组件。桌面端在六个原生目标上编译 Rust Launcher，以 PyInstaller `--onedir` 打包 Main App，再把两者组装为一个安装产物。安装后的应用入口指向 Launcher，冒烟测试从该入口启动并验证 Main App 发出的 `READY`。
+PR 和 `main` 构建并测试四个组件。桌面端在六个原生目标上编译 Rust Launcher，以 PyInstaller `--onedir` 打包 Main App，再把两者组装为一个安装产物。安装后的应用入口指向 Launcher，冒烟测试从该入口启动并验证 Main App 发出的 `READY`。上述流程已由 `.github/workflows/client.yml` 的 `build`、`installers` 和 `release` 三个作业实现：标签构建用 `client/scripts/package_desktop.py` 生成安装包，用 `--smoke-test --local-fixture` 从安装后的入口冒烟，Release 提供 6 个桌面压缩包、6 个更新包和 6 个安装包。macOS 暂用 ad-hoc 签名，Windows 未做 Authenticode；正式签名与公证仍需 Developer ID 证书和 Apple 公证凭据。
 
 | 平台 | 首版拟用格式 | 安装方式 |
 | --- | --- | --- |
 | Windows | WiX `.msi` | 按当前用户安装，支持开始菜单和系统卸载。MSI 内部使用与日期版本排序一致的三段数字版本。 |
 | macOS | `.dmg` | 拖入包含两个组件的 `MinecraftTools.app`。正式版对应用签名并做 Apple 公证。 |
-| Linux | Makeself `.run` | 安装到用户目录，添加桌面菜单入口并提供卸载命令。首版以 Ubuntu 24.04 为验证基线。 |
+| Linux | Makeself `.run` | 安装到 `${XDG_DATA_HOME:-~/.local/share}/minecrafttools`，建立 `~/.local/bin/minecrafttools` 和桌面菜单入口，安装目录内提供 `uninstall.sh`。首版以 Ubuntu 24.04 为验证基线。 |
 
-发布标签通过 CI 后，GitHub Release 提供六个安装包、自动更新包和校验文件。首版由 Launcher 自动更新 Main App，Launcher 自身通过完整安装包升级。Control Server 和 FRP Agent 各构建并测试一个覆盖 `linux/amd64` 和 `linux/arm64` 的镜像，再以同一个 `yyyy-mm-dd-n` 标签推送到 [Docker Hub 镜像仓库](build.md#docker-hub-镜像)。
+发布标签通过 CI 后，GitHub Release 提供六个安装包、自动更新包和校验文件。首版由 Launcher 自动更新 Main App，Launcher 自身通过完整安装包升级。Control Server 和 FRP Agent 各构建并测试一个覆盖 `linux/amd64` 和 `linux/arm64` 的镜像，再以同一个 `yyyy-mm-dd-n` 标签推送到 [Docker Hub 镜像仓库](build.md#docker-hub-镜像)。该流程已由 `.github/workflows/images.yml` 实现，标签推送时推送双架构镜像，`main` 和 PR 只做单平台构建。
 
 如启用 Phoenix 的 SFTP 发布，上传作业在构建和验证通过后传输指定的发布文件。由 Phoenix 托管更新时，先上传并校验版本文件，最后才切换对应通道的签名清单。GitHub 的环境名称、变量和目前的配置状态见[发布环境与凭据](build.md#发布环境与凭据)。
 
