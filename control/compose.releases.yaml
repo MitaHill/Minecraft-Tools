@@ -1,0 +1,6 @@
+services:
+  control:
+    environment:
+      CONTROL_RELEASE_DIR: /run/releases
+    volumes:
+      - ${CONTROL_RELEASE_DIRECTORY:?set CONTROL_RELEASE_DIRECTORY}:/run/releases:ro

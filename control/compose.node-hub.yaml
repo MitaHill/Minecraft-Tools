@@ -1,0 +1,12 @@
+services:
+  control:
+    ports:
+      - "${CONTROL_NODE_HUB_BIND:-127.0.0.1}:${CONTROL_NODE_HUB_PUBLIC_PORT:-9443}:9443"
+    environment:
+      CONTROL_NODE_HUB_HOST: 0.0.0.0
+      CONTROL_NODE_HUB_PORT: 9443
+      CONTROL_NODE_HUB_CERT: /run/control-tls/cert.pem
+      CONTROL_NODE_HUB_KEY: /run/control-tls/key.pem
+      CONTROL_SCANNER_ENABLED: ${CONTROL_SCANNER_ENABLED:-0}
+    volumes:
+      - ${CONTROL_NODE_HUB_TLS_DIR:?set CONTROL_NODE_HUB_TLS_DIR}:/run/control-tls:ro
