@@ -1,6 +1,9 @@
 # MSI 只带 Launcher 本体，不带 VC++ 运行库。这里把 MSVC 的 C 运行库静态链进
 # 可执行文件，干净的 Windows 上就不会再因为缺 VCRUNTIME140.dll 起不来。
 # 只对这两个三元组生效，不影响 macOS 和 Linux 的构建。
+#
+# 必须放在仓库根目录：cargo 从工作目录向上找 .cargo/config.toml，不看
+# --manifest-path。CI 在仓库根执行 cargo，放到 launcher/ 下会被静默忽略。
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 
