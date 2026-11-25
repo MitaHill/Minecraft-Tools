@@ -1,4 +1,4 @@
-from asyncio import CancelledError, Event, create_task
+from asyncio import CancelledError, Event, create_task, to_thread
 from contextlib import asynccontextmanager, suppress
 from os import environ
 from pathlib import Path
@@ -6,7 +6,7 @@ from re import fullmatch
 from tempfile import gettempdir
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -16,7 +16,7 @@ from .client_api import router as client_router
 from .database import diagnostics, open_database
 from .lobby import LobbySettings, cleanup_lobby
 from .lobby import router as lobby_router
-from .node_hub import NodeHub, server_tls
+from .node_hub import NodeHub, WebSocketNodeConnection, server_tls
 from .rate_limit import RateLimit
 from .scanner import ScanPolicy, run_scanner
 
@@ -67,16 +67,27 @@ async def lifespan(app: FastAPI):
     app.state.scanner_enabled = environ.get("CONTROL_SCANNER_ENABLED", "0") == "1"
     try:
         port = int(environ.get("CONTROL_NODE_HUB_PORT", "0"))
-        if port:
+        https_enabled = environ.get("CONTROL_NODE_HUB_HTTPS", "0") == "1"
+        client_ca = environ.get("CONTROL_NODE_HUB_CLIENT_CA", "")
+        if https_enabled and client_ca:
+            raise ValueError("The HTTPS node endpoint cannot be enabled on a mutual TLS hub")
+        if port or https_enabled:
             hub = NodeHub(database)
+        if port:
             await hub.start(
                 environ.get("CONTROL_NODE_HUB_HOST", "127.0.0.1"),
                 port,
                 server_tls(
-                    environ["CONTROL_NODE_HUB_CERT"], environ["CONTROL_NODE_HUB_KEY"]
+                    environ["CONTROL_NODE_HUB_CERT"],
+                    environ["CONTROL_NODE_HUB_KEY"],
+                    client_ca,
+                    environ.get("CONTROL_NODE_HUB_CLIENT_CRL", ""),
                 ),
             )
+        elif hub is not None:
+            await to_thread(hub.reset_online_state)
         app.state.node_hub = hub
+        app.state.node_hub_https = https_enabled
         if app.state.scanner_enabled:
             if hub is None:
                 raise ValueError("The tunnel scanner requires the node hub")
@@ -105,6 +116,15 @@ if (admin_dist / "index.html").is_file():
     app.frontend("/admin", directory=admin_dist)
 
 
+@app.websocket("/api/v1/node/connect")
+async def connect_node(websocket: WebSocket):
+    if not websocket.app.state.node_hub_https or websocket.url.scheme != "wss":
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    await websocket.accept()
+    await websocket.app.state.node_hub.serve(WebSocketNodeConnection(websocket))
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -125,17 +145,32 @@ def releases(channel: Literal["dev", "stable"], request: Request):
     )
 
 
-@app.get("/releases/artifacts/{filename}")
-def release_artifact(filename: str, request: Request):
-    if not fullmatch(
-        r"MinecraftTools-update-\d{4}-\d{2}-\d{2}-[1-9]\d*-(windows|darwin|linux)-(amd64|arm64)\.tar\.gz",
-        filename,
-    ):
+ARTIFACT_NAME = (
+    r"MinecraftTools-(?:"
+    r"update-[0-9]{4}-[0-9]{2}-[0-9]{2}-[1-9][0-9]*"
+    r"-(windows|darwin|linux)-(amd64|arm64)\.tar\.gz"
+    r"|[0-9]{4}-[0-9]{2}-[0-9]{2}-[1-9][0-9]*"
+    r"-(windows|darwin|linux)-(amd64|arm64)(?:\.zip|\.msi|\.dmg|\.run)"
+    r")"
+)
+
+
+@app.get("/releases/artifacts/{channel}/{filename}")
+def release_artifact(
+    channel: Literal["dev", "stable"], filename: str, request: Request
+):
+    if not fullmatch(ARTIFACT_NAME, filename):
         raise HTTPException(404, "Release artifact not found")
-    path = request.app.state.release_dir / "artifacts" / filename
+    path = request.app.state.release_dir / channel / "artifacts" / filename
     if not path.is_file() or path.is_symlink():
         raise HTTPException(404, "Release artifact not found")
-    return FileResponse(path, media_type="application/gzip", filename=filename)
+    if filename.endswith(".tar.gz"):
+        media_type = "application/gzip"
+    elif filename.endswith(".zip"):
+        media_type = "application/zip"
+    else:
+        media_type = "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 @app.post("/diagnostics", status_code=status.HTTP_201_CREATED, response_class=Response)

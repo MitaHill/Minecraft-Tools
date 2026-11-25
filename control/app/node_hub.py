@@ -3,12 +3,14 @@ import json
 import logging
 import ssl
 from contextlib import suppress
+from dataclasses import dataclass
 from hashlib import sha256
 from hmac import compare_digest
 from time import time
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
+from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.sqlite import insert
@@ -62,19 +64,86 @@ class CommandAcknowledgement(BaseModel):
     error: str = Field(default="", max_length=300)
 
 
-def server_tls(certfile: str, keyfile: str) -> ssl.SSLContext:
+def server_tls(
+    certfile: str, keyfile: str, client_ca: str = "", client_crl: str = ""
+) -> ssl.SSLContext:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile, keyfile)
+    if client_crl and not client_ca:
+        raise ValueError("The node client CRL requires a client CA")
+    if client_ca:
+        context.load_verify_locations(cafile=client_ca)
+        context.verify_mode = ssl.CERT_REQUIRED
+    if client_crl:
+        context.load_verify_locations(cafile=client_crl)
+        context.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF
     return context
+
+
+@dataclass
+class TLSNodeConnection:
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+
+    async def receive(self) -> bytes | None:
+        try:
+            return await self.reader.readuntil(b"\n")
+        except asyncio.IncompleteReadError as error:
+            if not error.partial:
+                return None
+            raise ProtocolError("truncated message") from None
+        except asyncio.LimitOverrunError:
+            raise ProtocolError("message too large") from None
+
+    async def send(self, body: bytes):
+        self.writer.write(body)
+        await self.writer.drain()
+
+    async def close(self):
+        self.writer.close()
+        await self.writer.wait_closed()
+
+    def verify_identity(self, node_id: str):
+        tls = self.writer.get_extra_info("ssl_object")
+        if tls is not None and tls.context.verify_mode == ssl.CERT_REQUIRED:
+            certificate = tls.getpeercert()
+            expected = ("URI", f"urn:minecrafttools:node:{node_id}")
+            identities = [
+                san
+                for san in (certificate or {}).get("subjectAltName", ())
+                if san[0] == "URI"
+            ]
+            if identities != [expected]:
+                raise ProtocolError("client certificate identity does not match node")
+
+
+@dataclass
+class WebSocketNodeConnection:
+    socket: WebSocket
+
+    async def receive(self) -> bytes | None:
+        event = await self.socket.receive()
+        if event["type"] == "websocket.disconnect":
+            return None
+        text = event.get("text")
+        if text is None:
+            raise ProtocolError("text message required")
+        return text.encode()
+
+    async def send(self, body: bytes):
+        await self.socket.send_text(body.decode())
+
+    async def close(self):
+        with suppress(RuntimeError, WebSocketDisconnect):
+            await self.socket.close()
 
 
 class NodeHub:
     def __init__(self, database: Engine):
         self.database = database
-        self.sessions: dict[str, asyncio.StreamWriter] = {}
+        self.sessions: dict[str, asyncio.Task] = {}
         self.locks: dict[str, asyncio.Lock] = {}
-        self.writers: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task] = set()
         self.server: asyncio.Server | None = None
 
@@ -93,9 +162,10 @@ class NodeHub:
     async def close(self):
         if self.server is not None:
             self.server.close()
-        for writer in self.writers:
-            writer.close()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        tasks = tuple(self.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self.server is not None:
             await self.server.wait_closed()
 
@@ -114,33 +184,29 @@ class NodeHub:
 
     @staticmethod
     async def read_message(
-        reader: asyncio.StreamReader, deadline: float
+        connection: TLSNodeConnection | WebSocketNodeConnection, deadline: float
     ) -> Message | None:
-        try:
-            async with asyncio.timeout_at(deadline):
-                line = await reader.readuntil(b"\n")
-        except asyncio.IncompleteReadError as error:
-            if not error.partial:
-                return None
-            raise ProtocolError("truncated message") from None
-        except asyncio.LimitOverrunError:
-            raise ProtocolError("message too large") from None
+        async with asyncio.timeout_at(deadline):
+            line = await connection.receive()
+        if line is None:
+            return None
         if len(line) > MAX_MESSAGE_SIZE:
             raise ProtocolError("message too large")
         return Message.model_validate_json(line)
 
     @staticmethod
     async def acknowledge(
-        writer: asyncio.StreamWriter, message: Message, payload: dict | None = None
+        connection: TLSNodeConnection | WebSocketNodeConnection,
+        message: Message,
+        payload: dict | None = None,
     ):
         reply = {
             "type": f"{message.type}_ack",
             "seq": message.seq,
             "payload": payload or {},
         }
-        writer.write(json.dumps(reply, separators=(",", ":")).encode() + b"\n")
         async with asyncio.timeout(5):
-            await writer.drain()
+            await connection.send(json.dumps(reply, separators=(",", ":")).encode() + b"\n")
 
     def authenticate(self, hello: Hello):
         query = select(nodes).where(nodes.c.id == hello.node_id)
@@ -304,33 +370,38 @@ class NodeHub:
                 )
 
     async def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        await self.serve(TLSNodeConnection(reader, writer))
+
+    async def serve(self, connection: TLSNodeConnection | WebSocketNodeConnection):
         task = asyncio.current_task()
         self.tasks.add(task)
-        self.writers.add(writer)
         node_id = None
         clock = asyncio.get_running_loop().time
         try:
-            first = await self.read_message(reader, clock() + HELLO_TIMEOUT)
+            first = await self.read_message(connection, clock() + HELLO_TIMEOUT)
             if first is None or first.type != "hello":
                 raise ProtocolError("hello required")
             hello = Hello.model_validate(first.payload)
+            if isinstance(connection, TLSNodeConnection):
+                connection.verify_identity(hello.node_id)
             node = await asyncio.to_thread(self.authenticate, hello)
             node_id = hello.node_id
             lock = self.locks.setdefault(node_id, asyncio.Lock())
             async with lock:
                 await asyncio.to_thread(self.set_online, hello)
                 previous = self.sessions.get(node_id)
-                self.sessions[node_id] = writer
+                self.sessions[node_id] = task
                 if previous is not None:
-                    previous.close()
-            await self.acknowledge(writer, first)
+                    previous.cancel()
+            await self.acknowledge(connection, first)
+            logger.info("Node authenticated node_id=%s", node_id)
 
             last_seq = first.seq
             last_heartbeat = clock()
             last_write = last_heartbeat
-            while self.sessions.get(node_id) is writer:
+            while self.sessions.get(node_id) is task:
                 message = await self.read_message(
-                    reader, last_heartbeat + HEARTBEAT_TIMEOUT
+                    connection, last_heartbeat + HEARTBEAT_TIMEOUT
                 )
                 if message is None:
                     break
@@ -339,7 +410,7 @@ class NodeHub:
                 last_seq = message.seq
                 payload = None
                 async with lock:
-                    if self.sessions.get(node_id) is not writer:
+                    if self.sessions.get(node_id) is not task:
                         break
                     if message.type == "tunnel_snapshot":
                         snapshot = Snapshot.model_validate(message.payload)
@@ -369,23 +440,25 @@ class NodeHub:
                             raise ProtocolError("unknown command acknowledgement")
                     else:
                         raise ProtocolError("unsupported message")
-                await self.acknowledge(writer, message, payload)
-        except (ProtocolError, ValidationError, TimeoutError, OSError) as error:
+                await self.acknowledge(connection, message, payload)
+        except (ProtocolError, ValidationError, TimeoutError, OSError, WebSocketDisconnect) as error:
             logger.info("Node connection ended (%s)", type(error).__name__)
+        except asyncio.CancelledError:
+            pass
         except SQLAlchemyError:
             logger.exception("Node registry operation failed")
         finally:
             try:
                 if node_id is not None:
                     async with self.locks[node_id]:
-                        if self.sessions.get(node_id) is writer:
+                        if self.sessions.get(node_id) is task:
                             del self.sessions[node_id]
                             await asyncio.to_thread(self.set_offline, node_id)
             except SQLAlchemyError:
                 logger.exception("Failed to mark disconnected node offline")
             finally:
-                writer.close()
-                with suppress(OSError, TimeoutError):
-                    await writer.wait_closed()
-                self.writers.discard(writer)
-                self.tasks.discard(task)
+                try:
+                    with suppress(OSError, TimeoutError):
+                        await connection.close()
+                finally:
+                    self.tasks.discard(task)

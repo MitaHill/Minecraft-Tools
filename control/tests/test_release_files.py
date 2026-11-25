@@ -24,7 +24,7 @@ class ReleaseFilesTests(unittest.TestCase):
         self.assertEqual(client.get("/releases/dev.json").status_code, 503)
 
         release_dir = root / "releases"
-        artifacts = release_dir / "artifacts"
+        artifacts = release_dir / "dev" / "artifacts"
         artifacts.mkdir(parents=True)
         manifest = b'{"schema":1,"key_id":"test","payload":"published","signature":"signature"}\n'
         (release_dir / "dev.json").write_bytes(manifest)
@@ -36,8 +36,21 @@ class ReleaseFilesTests(unittest.TestCase):
         name = "MinecraftTools-update-2026-11-25-2-darwin-arm64.tar.gz"
         (artifacts / name).write_bytes(b"test-package")
         response = client.get(
-            f"/releases/artifacts/{name}", headers={"Range": "bytes=0-3"}
+            f"/releases/artifacts/dev/{name}", headers={"Range": "bytes=0-3"}
         )
         self.assertEqual(response.status_code, 206)
         self.assertEqual(response.content, b"test")
-        self.assertEqual(client.get("/releases/artifacts/dev.json").status_code, 404)
+
+        installer = "MinecraftTools-2026-11-25-2-darwin-arm64.dmg"
+        (artifacts / installer).write_bytes(b"installer")
+        response = client.get(f"/releases/artifacts/dev/{installer}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"installer")
+
+        self.assertEqual(
+            client.get(f"/releases/artifacts/stable/{name}").status_code, 404
+        )
+        self.assertEqual(client.get("/releases/artifacts/dev/dev.json").status_code, 404)
+        self.assertEqual(
+            client.get(f"/releases/artifacts/other/{name}").status_code, 422
+        )

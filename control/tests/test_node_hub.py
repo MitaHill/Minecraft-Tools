@@ -3,6 +3,7 @@ import json
 import ssl
 import subprocess
 import unittest
+from contextlib import suppress
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 from sqlalchemy import select
 
-from app.database import open_database
+from app.database import audit_logs, open_database
 from app.node_hub import NodeHub, server_tls
 from app.registry import nodes, tunnels
 from app.tunnel_commands import acknowledge_command, commands, enqueue_command
@@ -36,6 +37,8 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
                 "/CN=localhost",
                 "-addext",
                 "subjectAltName=DNS:localhost",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
                 "-keyout",
                 cls.key,
                 "-out",
@@ -44,6 +47,62 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
             check=True,
             capture_output=True,
         )
+        cls.clients = {}
+        for label, node_id in (
+            ("current", "test-node"),
+            ("renewed", "test-node"),
+            ("other", "other-node"),
+        ):
+            cert, key, request, extensions = (
+                directory / f"{label}.{suffix}"
+                for suffix in ("pem", "key", "csr", "ext")
+            )
+            extensions.write_text(
+                "basicConstraints=critical,CA:FALSE\n"
+                "keyUsage=critical,digitalSignature\n"
+                "extendedKeyUsage=clientAuth\n"
+                f"subjectAltName=URI:urn:minecrafttools:node:{node_id}\n"
+            )
+            subprocess.run(
+                [
+                    "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+                    "-subj", f"/CN={label}", "-keyout", str(key), "-out", str(request),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "openssl", "x509", "-req", "-days", "1", "-in", str(request),
+                    "-CA", cls.cert, "-CAkey", cls.key, "-CAcreateserial",
+                    "-extfile", str(extensions), "-out", str(cert),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            cls.clients[label] = (cert, key)
+        (directory / "index.txt").touch()
+        config = directory / "ca.cnf"
+        config.write_text(
+            "[ca]\ndefault_ca = local\n"
+            "[local]\n"
+            f"database = {directory / 'index.txt'}\n"
+            f"new_certs_dir = {directory}\n"
+            f"certificate = {cls.cert}\n"
+            f"private_key = {cls.key}\n"
+            "default_md = sha256\n"
+            "default_crl_days = 1\n"
+        )
+        cls.crl = str(directory / "revoked.pem")
+        for args in (
+            ["-revoke", str(cls.clients["current"][0])],
+            ["-gencrl", "-out", cls.crl],
+        ):
+            subprocess.run(
+                ["openssl", "ca", "-batch", "-config", str(config), *args],
+                check=True,
+                capture_output=True,
+            )
 
     async def asyncSetUp(self):
         home = Path(self.enterContext(TemporaryDirectory()))
@@ -65,8 +124,10 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
         await self.hub.start("127.0.0.1", 0, server_tls(self.cert, self.key))
         self.addAsyncCleanup(self.hub.close)
 
-    async def connect(self):
+    async def connect(self, client=None):
         context = ssl.create_default_context(cafile=self.cert)
+        if client is not None:
+            context.load_cert_chain(*self.clients[client])
         port = self.hub.server.sockets[0].getsockname()[1]
         reader, writer = await asyncio.open_connection(
             "127.0.0.1",
@@ -77,10 +138,55 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
 
         async def close():
             writer.close()
-            await writer.wait_closed()
+            with suppress(ConnectionResetError, ssl.SSLError):
+                await writer.wait_closed()
 
         self.addAsyncCleanup(close)
         return reader, writer
+
+    async def test_mutual_tls_requires_certificate_bound_to_node_id(self):
+        await self.hub.close()
+        await self.hub.start(
+            "127.0.0.1", 0, server_tls(self.cert, self.key, client_ca=self.cert)
+        )
+        with suppress(ConnectionResetError, ssl.SSLError):
+            reader, writer = await self.connect()
+            await self.send(writer, "hello", 1, self.hello(self.secret))
+            self.assertEqual(await reader.readline(), b"")
+        self.assertEqual(self.statuses(), ("offline", {}))
+
+        reader, writer = await self.connect("other")
+        await self.send(writer, "hello", 1, self.hello(self.secret))
+        self.assertEqual(await reader.readline(), b"")
+        self.assertEqual(self.statuses(), ("offline", {}))
+
+        for client in ("current", "renewed"):
+            reader, writer = await self.connect(client)
+            await self.send(writer, "hello", 1, self.hello(self.secret))
+            self.assertEqual(json.loads(await reader.readline())["type"], "hello_ack")
+            await self.send(writer, "heartbeat", 2, {})
+            self.assertEqual(
+                json.loads(await reader.readline())["type"], "heartbeat_ack"
+            )
+        self.assertEqual(self.statuses(), ("online", {}))
+
+    async def test_mutual_tls_revokes_old_certificate_after_rotation(self):
+        await self.hub.close()
+        await self.hub.start(
+            "127.0.0.1",
+            0,
+            server_tls(self.cert, self.key, client_ca=self.cert, client_crl=self.crl),
+        )
+        with suppress(ConnectionResetError, ssl.SSLError):
+            reader, writer = await self.connect("current")
+            await self.send(writer, "hello", 1, self.hello(self.secret))
+            self.assertEqual(await reader.readline(), b"")
+        self.assertEqual(self.statuses(), ("offline", {}))
+
+        reader, writer = await self.connect("renewed")
+        await self.send(writer, "hello", 1, self.hello(self.secret))
+        self.assertEqual(json.loads(await reader.readline())["type"], "hello_ack")
+        self.assertEqual(self.statuses(), ("online", {}))
 
     async def send(self, writer, message_type, seq, payload):
         writer.write(
@@ -179,8 +285,12 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
             return json.loads(await reader.readline())["payload"]
 
         with patch("app.tunnel_commands.time", return_value=100) as clock:
-            queued = enqueue_command(self.db, tunnel_id, "block", "test", "operator")
+            queued = enqueue_command(self.db, tunnel_id, "block", "test", "admin:operator")
             cmd_id = queued["command_id"]
+            self.assertEqual(
+                enqueue_command(self.db, tunnel_id, "block", "retry", "admin:operator"),
+                queued,
+            )
             self.assertFalse(
                 acknowledge_command(self.db, "test-node", cmd_id, True, "")
             )
@@ -225,4 +335,9 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
             status, attempts, acked_at = connection.execute(
                 select(commands.c.status, commands.c.attempts, commands.c.acked_at)
             ).one()
+            audit = select(audit_logs.c.actor, audit_logs.c.action, audit_logs.c.target)
+            self.assertEqual(
+                connection.execute(audit).all(),
+                [("operator", "tunnel.block", tunnel_id)],
+            )
         self.assertEqual((status, attempts, acked_at), ("acked", 3, 130))
