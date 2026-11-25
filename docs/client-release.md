@@ -114,6 +114,18 @@ PR 和 `main` 构建并测试四个组件。桌面端在六个原生目标上编
 
 如启用 Phoenix 的 SFTP 发布，上传作业在构建和验证通过后传输指定的发布文件。由 Phoenix 托管更新时，先上传并校验版本文件，最后才切换对应通道的签名清单。GitHub 的环境名称、变量和目前的配置状态见[发布环境与凭据](build.md#发布环境与凭据)。
 
+### 发布验收矩阵
+
+本轮基线为 `99f9ee8` 的 `dev-2026-11-25-3`。六个安装作业、发布和清单部署均已完成。镜像工作流也已发布 Control Server 与 FRP Agent 双架构镜像。[桌面 CI](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45651994167) · [镜像 CI](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45651994121) · [预发布](https://github.com/MitaHill/Minecraft-Tools/releases/tag/dev-2026-11-25-3)
+
+| 验收项 | 平台 | 通过条件 |
+| --- | --- | --- |
+| 安装入口 | Windows、macOS、Linux 的 amd64 和 arm64 | 校验 CI 产物，按平台安装，从系统入口启动 Launcher 并观察主体 `READY`。记录系统版本、产物 SHA-256 与启动日志。 |
+| 真实在线更新 | 同上 | 在隔离数据目录准备旧版，从已安装的 Launcher 请求 Phoenix 的签名清单并下载 GitHub 更新包。检查平台匹配、大小和 SHA-256，收到 `READY` 后再提交新版本状态。 |
+| 失败回滚 | 同上 | 使用独立测试签名和隔离 Control Server，验证损坏的更新包以及签名有效但启动失败的候选。旧版仍能启动，版本指针保持原值，候选目录被清理，诊断可查询。 |
+| 系统安装生命周期 | 同上 | 验证安装入口、再次安装和移除应用。核对 Windows 开始菜单和 MSI 卸载、macOS 应用包、Linux 桌面入口和卸载脚本。 |
+| 正式签名 | macOS 两种架构 | 对实际 DMG 验证 Developer ID、公证票据和 Gatekeeper。 |
+
 ### 在构建时写入节点数据
 
 1. 为 `dev` 和 `stable` 使用对应的 GitHub Actions Environment。公开节点配置用环境 Variables。需要限制 GitHub 中查看权限的构建输入可用环境 Secrets，签名私钥等发布凭据只在对应 CI 作业中使用。[GitHub Actions Environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments) · [GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
