@@ -15,3 +15,6 @@ dist/
 cicd.yaml
 admin_config.json
 /tools/admin/config/frp-server-list-*.json
+
+# Rust launcher
+/launcher/target/
