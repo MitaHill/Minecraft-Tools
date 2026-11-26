@@ -21,6 +21,8 @@ CLAIM_SECONDS = 120
 
 class TunnelRegistration(BaseModel):
     node_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    # Clients older than the node catalog report no build channel; treat them as stable.
+    channel: Literal["stable", "dev"] = "stable"
 
 
 def digest(value: str) -> str:
@@ -144,7 +146,7 @@ def register_tunnel(
         node = connection.execute(
             select(nodes).where(nodes.c.id == node_id)
         ).mappings().one_or_none()
-        if node is None or node["client_channel"] == "hidden":
+        if node is None or node["client_channel"] not in (payload.channel, "both"):
             raise HTTPException(404, {"code": "node_not_found"})
         if node["server_port"] is None:
             raise HTTPException(503, {"code": "node_unconfigured"})

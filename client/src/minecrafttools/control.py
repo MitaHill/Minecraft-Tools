@@ -223,7 +223,7 @@ class TunnelControl(QObject):
                 b"POST",
                 "tunnels/register",
                 lambda code, data: reserved(code, data, retry),
-                {"node_id": node_id},
+                {"node_id": node_id, "channel": self.channel},
             )
 
         if self.token:

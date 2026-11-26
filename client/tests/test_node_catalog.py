@@ -43,6 +43,19 @@ class CatalogTests(unittest.TestCase):
         self.assertIsNone(stable.cached_catalog())
         self.assertEqual(len(list(Path(root).iterdir())), 1)
 
+    def test_reserve_reports_build_channel(self):
+        root = self.enterContext(TemporaryDirectory())
+        self.enterContext(patch.dict(os.environ, {
+            "MINECRAFTTOOLS_DATA_ROOT": root, "MINECRAFTTOOLS_BUILD_CHANNEL": "dev",
+        }))
+        control = TunnelControl(None, "https://control.example.test")
+        control.token = "A" * 43
+        with patch.object(control, "request") as request:
+            control.reserve("game", lambda *_: None)
+        args = request.call_args.args
+        self.assertEqual(args[1], "tunnels/register")
+        self.assertEqual(args[3], {"node_id": "game", "channel": "dev"})
+
     def test_rejects_invalid_or_blocked_payloads(self):
         for changes in (
             {"blocked": True}, {"updated_at": True}, {"min_frpc_version": "invalid"},

@@ -57,11 +57,14 @@ class ClientTunnelTests(unittest.TestCase):
         self.assertEqual(actual, digest(data["token"]))
         return {"Authorization": "Bearer " + data["token"]}
 
-    def reserve(self, headers):
+    def reserve(self, headers, channel=None, node_id=None):
+        payload = {"node_id": node_id or self.node["id"]}
+        if channel is not None:
+            payload["channel"] = channel
         return self.http.post(
             "/api/v1/tunnels/register",
             headers=headers,
-            json={"node_id": self.node["id"]},
+            json=payload,
         )
 
     def tunnel_owner(self):
@@ -83,6 +86,32 @@ class ClientTunnelTests(unittest.TestCase):
             connection.execute(node_port_ranges.insert().values(
                 node_id=self.node["id"], pending=False, start_port=port, end_port=port,
             ))
+
+    def test_registration_enforces_node_publish_channel(self):
+        def claim(channel, headers):
+            response = self.reserve(headers, channel)
+            if response.status_code == 201:
+                self.assertEqual(self.http.delete(
+                    f"/api/v1/tunnels/{response.json()['id']}", headers=headers,
+                ).status_code, 204)
+            return response
+
+        self.publish_node(client_channel="dev")
+        self.assertEqual(claim(None, self.owner).status_code, 404)
+        self.assertEqual(claim("stable", self.owner).status_code, 404)
+        self.assertEqual(claim("dev", self.owner).status_code, 201)
+
+        self.publish_node(client_channel="both")
+        self.assertEqual(claim(None, self.owner).status_code, 201)
+        self.assertEqual(claim("dev", self.other).status_code, 201)
+
+        self.publish_node(client_channel="stable")
+        self.assertEqual(claim("dev", self.owner).status_code, 404)
+        self.assertEqual(claim("stable", self.owner).status_code, 201)
+
+        self.publish_node(client_channel="hidden")
+        self.assertEqual(claim(None, self.owner).status_code, 404)
+        self.assertEqual(claim("dev", self.owner).status_code, 404)
 
     def test_concurrent_automatic_requests_reserve_distinct_ports_then_exhaust(self):
         self.publish_node(frp_token="fixture-frpc-token")
