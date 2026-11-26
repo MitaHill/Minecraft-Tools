@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Table,
     delete,
+    exists,
     select,
     update,
 )
@@ -22,6 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .database import metadata
 from .java_probe import Status, probe
+from .node_ports import node_port_ranges
 from .registry import nodes, tunnels
 from .tunnel_commands import CommandConflict, enqueue_command
 
@@ -83,7 +85,13 @@ def select_due(database: Engine, now: float) -> list[dict]:
                 nodes.c.status == "online",
                 tunnels.c.status.in_(SCANNABLE),
                 tunnels.c.next_scan_at <= now,
-                tunnels.c.remote_port.between(nodes.c.port_start, nodes.c.port_end),
+                exists().where(
+                    node_port_ranges.c.node_id == tunnels.c.node_id,
+                    node_port_ranges.c.pending.is_(False),
+                    tunnels.c.remote_port.between(
+                        node_port_ranges.c.start_port, node_port_ranges.c.end_port
+                    ),
+                ),
             )
             .order_by(tunnels.c.next_scan_at, tunnels.c.id)
         ).mappings()

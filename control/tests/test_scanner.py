@@ -6,10 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sqlalchemy import select
+from support import seed_node
 
 from app.database import open_database
 from app.java_probe import Status, encode_length, probe, read_length
-from app.registry import nodes, tunnels
+from app.registry import tunnels
 from app.scanner import ScanPolicy, record_scan, scans, select_due
 from app.tunnel_commands import next_command
 
@@ -97,16 +98,13 @@ class ScanPolicyTests(unittest.TestCase):
         self.addCleanup(self.database.dispose)
         self.policy = ScanPolicy()
         with self.database.begin() as connection:
-            connection.execute(
-                nodes.insert().values(
-                    id="test-node",
-                    name="Test",
-                    public_host="node.test",
-                    status="online",
-                    port_start=30001,
-                    port_end=30002,
-                    token_hash="test-token-hash",
-                )
+            seed_node(
+                connection,
+                "test-node",
+                ranges=((30001, 30002), (30005, 30005)),
+                name="Test",
+                public_host="node.test",
+                token_hash="test-token-hash",
             )
             connection.execute(
                 tunnels.insert().values(
@@ -163,3 +161,19 @@ class ScanPolicyTests(unittest.TestCase):
                 ["unreachable"],
             )
         self.assertIsNone(next_command(self.database, "test-node"))
+
+    def test_tunnels_outside_configured_ranges_are_skipped(self):
+        with self.database.begin() as connection:
+            connection.execute(
+                tunnels.insert().values(
+                    id="outside",
+                    node_id="test-node",
+                    run_id="run-b",
+                    proxy_name="outside",
+                    remote_port=30003,
+                    status="pending",
+                    created_at=100,
+                    next_scan_at=100,
+                )
+            )
+        self.assertEqual([item["id"] for item in select_due(self.database, 100)], ["tested"])

@@ -248,9 +248,9 @@ func (agent *Agent) plugin(response http.ResponseWriter, request *http.Request) 
 			return
 		}
 	case "NewProxy":
-		start, end := agent.portStart, agent.portEnd
+		ranges := [][2]int{{agent.portStart, agent.portEnd}}
 		if policy := agent.policy.Range; policy != nil {
-			start, end = max(start, policy.Start), min(end, policy.End)
+			ranges = policy.effectiveRanges()
 		}
 		if !agent.policyReady {
 			pluginReply(response, "node policy is synchronizing")
@@ -268,7 +268,7 @@ func (agent *Agent) plugin(response http.ResponseWriter, request *http.Request) 
 			}
 		}
 		if content.ProxyType != "tcp" || content.Group != "" ||
-			proxy.RemotePort < start || proxy.RemotePort > end {
+			!portInRanges(ranges, proxy.RemotePort) {
 			pluginReply(response, "only a dedicated TCP port in the configured range is allowed")
 			return
 		}

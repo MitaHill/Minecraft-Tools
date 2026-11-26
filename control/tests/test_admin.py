@@ -9,14 +9,17 @@ from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select
 from starlette.websockets import WebSocketDisconnect
+from support import seed_node
 
 from app.database import audit_logs
 from app.lobby import rooms
 from app.main import app
 from app.moderation import acknowledge_policy, blacklist, ip_block, node_policy
 from app.node_hub import Hello, NodeHub, ProtocolError
-from app.registry import nodes, tunnels
+from app.node_ports import node_port_ranges
+from app.registry import blocks, installs, nodes, tunnel_claims, tunnels
 from app.scanner import scans
+from app.tunnel_commands import commands
 
 
 class AdminTests(unittest.TestCase):
@@ -81,8 +84,7 @@ class AdminTests(unittest.TestCase):
             "id": "test-node",
             "name": "Test Node",
             "public_host": "test.example",
-            "port_start": 30001,
-            "port_end": 30002,
+            "allowed_ports": "30001-30002",
         }
         self.assertEqual(self.sign_in("reader").status_code, 200)
         self.assertEqual(self.http.get("/api/admin/nodes").json(), {"nodes": []})
@@ -164,7 +166,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(initial["min_frpc_version"], app.state.min_frpc_version)
         payload = {
             "id": "test-node", "name": "Test Node", "public_host": "game.example",
-            "port_start": 30001, "port_end": 30002, "client_channel": "dev",
+            "allowed_ports": "30001-30002", "client_channel": "dev",
         }
         self.assertEqual(self.http.post("/api/admin/nodes", json=payload).status_code, 422)
         payload.update(server_port=7000, frp_token="fixture-frpc-token")
@@ -177,7 +179,7 @@ class AdminTests(unittest.TestCase):
         (admin_node,) = self.http.get("/api/admin/nodes").json()["nodes"]
         self.assertTrue(admin_node["frp_token_configured"])
         self.assertNotIn("frp_token", admin_node)
-        payload = {key: payload[key] for key in ("public_host", "port_start", "port_end")}
+        payload = {key: payload[key] for key in ("public_host", "allowed_ports")}
         edit = "/api/admin/nodes/test-node"
         self.assertEqual(self.http.patch(edit, json={**payload, "name": "Renamed"}).status_code, 200)
         renamed = self.http.get(url).json()
@@ -197,13 +199,13 @@ class AdminTests(unittest.TestCase):
             ))
         client = TestClient(app, base_url="https://control.test", client=("192.0.2.14", 50000))
         self.addCleanup(client.close)
-        for route in ("/api/v1/node-catalog", "/api/v1/nodes"):
-            response = client.get(route)
-            self.assertEqual(response.status_code, 403)
-            self.assertEqual(response.headers["Cache-Control"], "no-store")
-            self.assertEqual(response.json(), {"detail": {
-                "code": "ip_blacklisted", "blocked": True, "reason": "Please contact support",
-            }})
+        response = client.get("/api/v1/node-catalog")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(response.json(), {"detail": {
+            "code": "ip_blacklisted", "blocked": True, "reason": "Please contact support",
+        }})
+        self.assertEqual(client.get("/api/v1/nodes").status_code, 404)
 
     def test_invalid_credentials_and_cross_origin_requests(self):
         payload = {"username": "reader", "password": "wrong"}
@@ -219,12 +221,15 @@ class AdminTests(unittest.TestCase):
 
     def register_policy_node(self, node_id, *, cidr=False):
         with app.state.database.begin() as connection:
-            connection.execute(insert(nodes).values(
-                id=node_id, name=node_id, public_host=f"{node_id}.example",
-                port_start=30001, port_end=30004, token_hash="fixture",
-                status="online", deployed_ports=[[30001, 30008]], blacklist_revision=0,
+            seed_node(
+                connection,
+                node_id,
+                ranges=((30001, 30004),),
+                public_host=f"{node_id}.example",
+                deployed_ports=[[30001, 30008]],
+                blacklist_revision=0,
                 blacklist_cidr=cidr,
-            ))
+            )
 
     def test_live_websocket_origin_reconnect_state_and_ip_blacklist(self):
         self.sign_in("owner")
@@ -265,7 +270,10 @@ class AdminTests(unittest.TestCase):
 
     def test_range_update_conflicts_then_waits_for_agent_ack(self):
         self.register_policy_node("a")
-        payload = {"name": "A", "public_host": "a.example", "port_start": 30003, "port_end": 30007}
+        payload = {
+            "name": "A", "public_host": "a.example",
+            "allowed_ports": "30003-30005,30007",
+        }
         self.sign_in("reader")
         self.assertEqual(self.http.patch("/api/admin/nodes/a", json=payload).status_code, 403)
         self.sign_in("owner")
@@ -280,17 +288,132 @@ class AdminTests(unittest.TestCase):
         with app.state.database.begin() as connection:
             connection.execute(tunnels.update().values(proxy_present=False, status="closed"))
         self.assertEqual(self.http.patch("/api/admin/nodes/a", json=payload).json(), {"pending": True})
-        self.assertEqual(self.http.get("/api/v1/nodes").json()["nodes"][0]["port_start"], 30001)
+        row = self.http.get("/api/admin/nodes").json()["nodes"][0]
+        self.assertEqual(row["allowed_ports"], "30001-30004")
+        self.assertEqual(row["pending_allowed_ports"], "30003-30005,30007")
         policy = node_policy(app.state.database, "a")["range"]
+        self.assertEqual(policy["ranges"], [[30003, 30005], [30007, 30007]])
+        self.assertEqual((policy["start"], policy["end"]), (30003, 30007))
         acknowledge_policy(app.state.database, "a", "range", policy["revision"], "port occupied")
         row = self.http.get("/api/admin/nodes").json()["nodes"][0]
-        self.assertEqual((row["port_start"], row["range_error"]), (30001, "port occupied"))
+        self.assertEqual(
+            (row["allowed_ports"], row["pending_allowed_ports"], row["range_error"]),
+            ("30001-30004", None, "port occupied"),
+        )
         self.assertEqual(self.http.patch("/api/admin/nodes/a", json=payload).status_code, 200)
         policy = node_policy(app.state.database, "a")["range"]
         acknowledge_policy(app.state.database, "a", "range", policy["revision"], "")
-        row = self.http.get("/api/v1/nodes").json()["nodes"][0]
-        self.assertEqual((row["port_start"], row["port_end"]), (30003, 30007))
-        self.assertNotIn("token_hash", row)
+        row = self.http.get("/api/admin/nodes").json()["nodes"][0]
+        self.assertEqual((row["allowed_ports"], row["pending_allowed_ports"]), ("30003-30005,30007", None))
+
+    def test_ports_are_normalized_and_must_fit_deployed_ranges(self):
+        self.register_policy_node("a")
+        self.sign_in("owner")
+        url = "/api/admin/nodes/a"
+        base = {"name": "A", "public_host": "a.example"}
+        for spec, message in (
+            ("1023", "端口需在 1024–65535 之间"),
+            ("30005-30001", "端口范围起止顺序错误"),
+            ("30001,,30002", "请输入允许端口"),
+            ("30001-30002-30003", "端口格式应为 30000-30010,31000"),
+            ("30001,65536", "端口需在 1024–65535 之间"),
+            ("30009", "映射范围须在节点已部署的端口范围内"),
+        ):
+            response = self.http.patch(url, json={**base, "allowed_ports": spec})
+            self.assertEqual(response.status_code, 422, spec)
+            self.assertIn(message, str(response.json()))
+        normalized = self.http.patch(url, json={
+            **base, "allowed_ports": "30004,30001-30002,30003,30006",
+        })
+        self.assertEqual(normalized.status_code, 200)
+        self.assertEqual(normalized.json(), {"pending": True})
+        row = self.http.get("/api/admin/nodes").json()["nodes"][0]
+        self.assertEqual(row["pending_allowed_ports"], "30001-30004,30006")
+
+    def test_delete_node_guards(self):
+        self.register_policy_node("a")
+        self.sign_in("reader")
+        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 403)
+        self.sign_in("owner")
+        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 409)
+        with app.state.database.begin() as connection:
+            connection.execute(nodes.update().values(status="offline"))
+            connection.execute(insert(tunnels).values(
+                id="t", node_id="a", run_id="run", proxy_name="t",
+                remote_port=30001, status="active",
+            ))
+        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 409)
+        with app.state.database.begin() as connection:
+            connection.execute(tunnels.update().values(proxy_present=False, status="closed"))
+            connection.execute(insert(installs).values(
+                id="install", token_hash="token", created_at=0, last_seen=0,
+            ))
+            connection.execute(insert(tunnel_claims).values(
+                id="claim", install_id="install", node_id="a", remote_port=30001,
+                proof_hash="proof", expires_at=time() + 60,
+            ))
+        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 409)
+        with app.state.database.begin() as connection:
+            connection.execute(tunnel_claims.delete())
+            connection.execute(insert(blocks).values(
+                tunnel_id="t", node_id="a", port=30001, run_id="run", proxy_name="t",
+                reason="fixture", source="manual", active=True, created_at=0,
+            ))
+        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 409)
+        with app.state.database.begin() as connection:
+            connection.execute(blocks.update().values(active=False))
+        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 204)
+        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 404)
+
+    def test_delete_node_cleans_history_and_refreshes_catalog(self):
+        self.register_policy_node("a")
+        self.sign_in("owner")
+        with app.state.database.begin() as connection:
+            connection.execute(nodes.update().where(nodes.c.id == "a").values(
+                status="offline", client_channel="dev", server_port=7000,
+            ))
+            connection.execute(insert(installs).values(
+                id="install", token_hash="token", created_at=0, last_seen=0,
+            ))
+            connection.execute(insert(tunnels).values(
+                id="t", node_id="a", run_id="run", proxy_name="t",
+                remote_port=30001, status="closed", proxy_present=False,
+            ))
+            connection.execute(tunnel_claims.insert().values(
+                id="claim", install_id="install", node_id="a", remote_port=30002,
+                proof_hash="proof", expires_at=0,
+            ))
+            connection.execute(scans.insert().values(
+                tunnel_id="t", checked_at=0, result="ok",
+            ))
+            block_id = connection.execute(blocks.insert().values(
+                tunnel_id="t", node_id="a", port=30001, run_id="run", proxy_name="t",
+                reason="fixture", source="manual", active=False, created_at=0,
+            ).returning(blocks.c.id)).scalar_one()
+            connection.execute(commands.insert().values(
+                block_id=block_id, node_id="a", action="block", status="acked",
+                created_at=0, next_attempt_at=0,
+            ))
+            connection.execute(rooms.insert().values(
+                full_room_code="30001_1", remote_port=30001, node_id=1, room_name="room",
+                player_count=1, max_players=8, is_public=True, host_player="Player",
+                server_addr="a.example", updated_at=time(), client_ip="203.0.113.9",
+                tunnel_id="t", listing_id="room",
+            ))
+        before = self.http.get("/api/v1/node-catalog?channel=dev").json()["updated_at"]
+        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 204)
+        after = self.http.get("/api/v1/node-catalog?channel=dev").json()
+        self.assertGreater(after["updated_at"], before)
+        with app.state.database.connect() as connection:
+            for table in (tunnels, scans, blocks, tunnel_claims, commands, rooms, node_port_ranges):
+                self.assertEqual(connection.execute(select(table)).all(), [], table.name)
+            self.assertEqual(
+                connection.execute(
+                    select(audit_logs.c.action).where(audit_logs.c.action == "node.delete")
+                ).scalar_one(),
+                "node.delete",
+            )
+
 
     def test_manual_cidr_rules_and_legacy_nodes(self):
         url = "/api/admin/blacklist"

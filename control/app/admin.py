@@ -33,10 +33,21 @@ from .moderation import (
     settings,
     touch_node_catalog,
 )
+from .node_ports import (
+    MAX_TEXT,
+    contains,
+    format_spec,
+    has_pending,
+    load_ranges,
+    parse_spec,
+    ranges_by_node,
+    replace_ranges,
+    within,
+)
 from .rate_limit import RateLimit
 from .registry import blocks, nodes, tunnel_claims, tunnels
 from .scanner import SCANNABLE, scans
-from .tunnel_commands import CommandConflict, enqueue_command
+from .tunnel_commands import CommandConflict, commands, enqueue_command
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin")
@@ -98,8 +109,7 @@ class LobbyToggle(BaseModel):
 class NodeConfiguration(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     public_host: str = Field(min_length=1, max_length=253)
-    port_start: int = Field(ge=1024, le=65535)
-    port_end: int = Field(ge=1024, le=65535)
+    allowed_ports: str = Field(min_length=1, max_length=MAX_TEXT)
     server_addr: str | None = Field(default=None, max_length=253)
     server_port: int | None = Field(default=None, ge=1, le=65535, strict=True)
     frp_token: SecretStr | None = Field(default=None, max_length=1024)
@@ -119,12 +129,15 @@ class NodeConfiguration(BaseModel):
             raise ValueError("请输入有效的主机名或 IP")
         return host
 
+    @field_validator("allowed_ports")
+    @classmethod
+    def validate_allowed_ports(cls, value: str) -> str:
+        return format_spec(parse_spec(value))
+
     @model_validator(mode="after")
-    def validate_port_range(self):
+    def validate_name(self):
         if not self.name.strip():
             raise ValueError("请输入节点名称")
-        if self.port_end < self.port_start:
-            raise ValueError("port_end must be greater than or equal to port_start")
         return self
 
     def client_config(self) -> dict:
@@ -277,7 +290,16 @@ def list_nodes(request: Request, _account: SignedIn):
         nodes.c.frp_token.is_not(None).label("frp_token_configured"),
     ).order_by(nodes.c.id)
     with request.app.state.database.connect() as connection:
-        items = [dict(row) for row in connection.execute(query).mappings()]
+        active = ranges_by_node(connection)
+        pending = ranges_by_node(connection, pending=True)
+        items = []
+        for row in connection.execute(query).mappings():
+            item = dict(row)
+            item["allowed_ports"] = format_spec(active.get(row["id"], ()))
+            item["pending_allowed_ports"] = (
+                format_spec(pending[row["id"]]) if row["id"] in pending else None
+            )
+            items.append(item)
     return {"nodes": items}
 
 
@@ -290,9 +312,11 @@ def register_node(
     if payload.client_channel != "hidden" and payload.server_port is None:
         raise HTTPException(422, "发布线路前需要填写 frpc 连接端口")
     token = token_urlsafe(32)
+    ranges = parse_spec(payload.allowed_ports)
     statement = sqlite_insert(nodes).values(
         **payload.model_dump(exclude={
-            "name", "server_addr", "server_port", "frp_token", "client_channel",
+            "name", "allowed_ports", "server_addr", "server_port", "frp_token",
+            "client_channel",
         }),
         **payload.client_config(),
         name=payload.name.strip(),
@@ -302,6 +326,7 @@ def register_node(
     with request.app.state.database.begin() as connection:
         if connection.execute(statement).rowcount != 1:
             raise HTTPException(409, "Node already exists")
+        replace_ranges(connection, payload.id, ranges)
         if payload.client_channel != "hidden":
             touch_node_catalog(connection)
         record_admin_action(connection, account.username, "node.register", payload.id)
@@ -409,7 +434,7 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
     if account.role != "superadmin":
         raise HTTPException(403, "Superadmin permission required")
     name, host = payload.name.strip(), payload.public_host
-    start, end = payload.port_start, payload.port_end
+    ranges = parse_spec(payload.allowed_ports)
     client_config = payload.client_config()
     with request.app.state.database.begin() as connection:
         lock_settings(connection)
@@ -420,9 +445,9 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
         server_port = client_config.get("server_port", node["server_port"])
         if channel != "hidden" and server_port is None:
             raise HTTPException(422, "发布线路前需要填写 frpc 连接端口")
-        changing_range = (start, end) != (node["port_start"], node["port_end"])
+        changing_range = ranges != load_ranges(connection, node_id)
         changing_host = host != node["public_host"]
-        if node["pending_port_start"] is not None:
+        if has_pending(connection, node_id):
             raise HTTPException(409, "节点正在应用端口范围")
         if changing_range or changing_host:
             if node["status"] != "online":
@@ -437,7 +462,7 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
             )
             reserved = select(blocks.c.port).where(blocks.c.node_id == node_id, blocks.c.active)
             used = set(connection.execute(live_ports.union(claims, reserved)).scalars())
-            conflicts = sorted(port for port in used if changing_host or not start <= port <= end)
+            conflicts = sorted(port for port in used if changing_host or not contains(ranges, port))
             if conflicts:
                 ports = "、".join(map(str, conflicts))
                 raise HTTPException(409, f"以下端口仍在使用或预留：{ports}")
@@ -446,17 +471,68 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
             deployed = node["deployed_ports"]
             if deployed is None:
                 raise HTTPException(409, "节点 Agent 尚未同步部署端口范围")
-            if not any(low <= start <= end <= high for low, high in deployed):
+            if not within(ranges, deployed):
                 raise HTTPException(422, "映射范围须在节点已部署的端口范围内")
-            values.update(
-                pending_port_start=start, pending_port_end=end,
-                range_revision=node["range_revision"] + 1, range_error=None,
-            )
+            replace_ranges(connection, node_id, ranges, pending=True)
+            values.update(range_revision=node["range_revision"] + 1, range_error=None)
         connection.execute(update(nodes).where(nodes.c.id == node_id).values(**values))
         if channel != node["client_channel"] or (channel != "hidden" and name != node["name"]):
             touch_node_catalog(connection)
         record_admin_action(connection, account.username, "node.edit", node_id)
     return {"pending": changing_range}
+
+
+@router.delete("/nodes/{node_id}", status_code=204, dependencies=[Depends(same_origin)])
+def delete_node(node_id: str, request: Request, account: SignedIn):
+    if account.role != "superadmin":
+        raise HTTPException(403, "Superadmin permission required")
+    with request.app.state.database.begin() as connection:
+        node = connection.execute(select(nodes).where(nodes.c.id == node_id)).mappings().one_or_none()
+        if node is None:
+            raise HTTPException(404, "节点不存在")
+        if has_pending(connection, node_id):
+            raise HTTPException(409, "节点正在应用端口范围")
+        if node["status"] == "online":
+            raise HTTPException(409, "节点在线，先停止 Agent")
+        tunnel_ids = select(tunnels.c.id).where(tunnels.c.node_id == node_id)
+        live = connection.execute(
+            select(tunnels.c.id)
+            .where(
+                tunnels.c.node_id == node_id,
+                tunnels.c.proxy_present.is_(True) | (tunnels.c.status != "closed"),
+            )
+            .limit(1)
+        ).first()
+        if live is not None:
+            raise HTTPException(409, "该节点仍有实时映射")
+        claimed = connection.execute(
+            select(tunnel_claims.c.id)
+            .where(tunnel_claims.c.node_id == node_id, tunnel_claims.c.expires_at > time())
+            .limit(1)
+        ).first()
+        if claimed is not None:
+            raise HTTPException(409, "该节点仍有未释放的端口预留")
+        blocked = connection.execute(
+            select(blocks.c.id)
+            .where(blocks.c.node_id == node_id, blocks.c.active.is_(True))
+            .limit(1)
+        ).first()
+        if blocked is not None:
+            raise HTTPException(409, "该节点仍有生效中的封禁")
+        connection.execute(delete(rooms).where(rooms.c.tunnel_id.in_(tunnel_ids)))
+        connection.execute(delete(commands).where(commands.c.node_id == node_id))
+        connection.execute(delete(scans).where(scans.c.tunnel_id.in_(tunnel_ids)))
+        connection.execute(delete(blocks).where(blocks.c.node_id == node_id))
+        connection.execute(delete(tunnel_claims).where(tunnel_claims.c.node_id == node_id))
+        connection.execute(delete(tunnels).where(tunnels.c.node_id == node_id))
+        removed = connection.execute(
+            delete(nodes).where(nodes.c.id == node_id, nodes.c.status != "online")
+        )
+        if removed.rowcount != 1:
+            raise HTTPException(409, "节点状态已变化，请重试")
+        if node["client_channel"] != "hidden":
+            touch_node_catalog(connection)
+        record_admin_action(connection, account.username, "node.delete", node_id)
 
 
 def tunnel_snapshot(database):

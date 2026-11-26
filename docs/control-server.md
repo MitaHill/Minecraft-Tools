@@ -128,7 +128,7 @@ Control Server 已实现 Launcher 接口、兼容大厅接口和管理台。启�
 - frps 的 `webServer` 只监听容器网络内部，例如 `0.0.0.0:7400`，不发布到宿主机公网。
 - agent 的 plugin 监听 `0.0.0.0:9000`，frps 通过 `agent:9000` 访问。
 - 首版沿用 1:1 端口映射，例如 `30000-30100:30000-30100`。helper 始终匹配 frps 的容器侧监听端口，采用非 1:1 映射时，控制端需分别记录公网端口和容器端口。
-- frps 的 `allowPorts` 和 agent 的 plugin 都校验端口范围；客户端 UI 只能选择节点允许的范围。
+- frps 的 `allowPorts` 和 agent 的 plugin 都校验允许端口集合；客户端 UI 只能选择控制端分配的结果。
 - 游戏端口范围与控制端口、管理端口及该命名空间的临时源端口范围分离。范围有重叠时，在命名空间配置 `ip_local_reserved_ports` 并验证自动分配结果。 [Linux 端口分配文档](https://docs.kernel.org/networking/ip-sysctl.html)
 - 当前客户端随机端口是 `10000-65534`，必须改为按节点返回的端口范围选择，否则大部分启动会失败。
 
@@ -176,7 +176,8 @@ SQLite 使用 WAL，单进程写入。表设计：
 
 | 表 | 关键字段 |
 | --- | --- |
-| `nodes` | `id`, `name`, `public_host`, `port_start`, `port_end`, `agent_version`, `frps_version`, `status`, `last_seen`, `token_hash` |
+| `nodes` | `id`, `name`, `public_host`, `agent_version`, `frps_version`, `status`, `last_seen`, `token_hash` |
+| `node_port_ranges` | `node_id`, `pending`, `start_port`, `end_port`；每个节点一组生效范围（`pending = 0`）和一组待确认范围（`pending = 1`），外键级联删除 |
 | `tunnels` | `id`, `node_id`, `run_id`, `proxy_name`, `remote_port`, `remote_addr`, `local_ip`, `local_port`, `install_id`, `status`, `scan_failures`, `last_scan_at`, `blocked_at`, `block_reason` |
 | `tunnel_scans` | `id`, `tunnel_id`, `checked_at`, `result`, `latency_ms`, `version`, `motd`, `error` |
 | `blocks` | `id`, `tunnel_id`, `node_id`, `port`, `reason`, `source`, `active`, `created_at`, `removed_at` |
@@ -283,7 +284,7 @@ GET  /api/v1/lobby/online
 客户端状态联动按以下顺序实现并验收。
 
 1. 第一次使用受控线路时，由 `POST /api/v1/installs/register` 发放安装 ID 和随机令牌。令牌按 Control Server 地址保存在用户数据目录，数据库只保留摘要。后续用 `Authorization: Bearer` 认证，监听器和大厅记录均不公开令牌。
-2. 受控线路在写 frpc 配置前，使用节点 ID 和远程端口申请隧道注册。控制端核对该节点的允许范围，返回 `id`、`proxy_name` 和独立生成的 `proof`。注册租期为 120 秒，已映射的客户端每 25 秒续约。
+2. 受控线路在写 frpc 配置前，只用节点 ID 申请隧道注册。控制端核对该节点的允许端口集合，分配远程端口并返回 `id`、`proxy_name`、`proof` 和连接参数。注册租期为 120 秒，已映射的客户端每 25 秒续约。
 3. 客户端把隧道 ID 和证明放入该代理的 FRP metadata。Agent 随快照上报证明摘要，控制端核对节点、代理名、端口及摘要后才确认归属。客户端状态查询只对所属安装开放。测试覆盖伪造 metadata、旧代次、异地节点和端口复用。
 4. 主体每 5 秒非阻塞查询状态。收到 `block_pending` 或 `blocked` 时显示原因，停止 frpc，清除映射地址并结束大厅续期。退出映射时注销注册。为晚到的 HTTP 回包、FRP 重连和退出期间的封禁分别验证状态一致性。
 5. 先在本地用两个安装身份验证权限和映射流程，再通过 Phoenix 与香港节点用实际 Launcher 和客户端验收封禁界面。用同一 FRP 会话的第二条测试代理确认目标端口隔离。
@@ -324,6 +325,7 @@ ack             {command_id, ok, error}
 - 重连退避 1s → 60s，带 jitter。
 - 重连后发送全量 `tunnel_snapshot`。
 - 命令带 `command_id`，至少一次、幂等；agent 持久化最近命令。
+- 策略随 `hello_ack` 和心跳回包下发。`range` 同时携带 `ranges`（完整多段）与 `start`/`end`（首段起、末段止）：新 Agent 按 `ranges` 校验，旧 Agent 忽略 `ranges`、按 `start`/`end` 校验。
 - 单行最大 1 MB；超过断开并记录。
 
 ### 6.5 管理端 API
@@ -332,6 +334,7 @@ ack             {command_id, ok, error}
 GET/POST/DELETE /api/admin/session
 GET/POST /api/admin/nodes
 PATCH    /api/admin/nodes/{id}
+DELETE   /api/admin/nodes/{id}
 GET      /api/admin/tunnels?status=
 WS       /api/admin/tunnels/live
 POST     /api/admin/tunnels/{id}/block
@@ -350,7 +353,7 @@ DELETE   /api/admin/lobby/rooms/{listing_id}
 GET      /api/admin/audit
 ```
 
-管理端已实现基于 Cookie 的服务端会话。超级管理员、运维和只读角色可读取管理页面。创建和编辑节点限超级管理员。创建响应只返回一次节点密钥，节点列表省略密钥及其摘要。[账号配置](../control/README.md#管理台前端)
+管理端已实现基于 Cookie 的服务端会话。超级管理员、运维和只读角色可读取管理页面。创建、编辑和删除节点限超级管理员。创建响应只返回一次节点密钥，节点列表省略密钥及其摘要。[账号配置](../control/README.md#管理台前端)
 
 ## 7. 隧道发现与身份
 
@@ -805,7 +808,7 @@ ops = ["Login", "NewProxy", "CloseProxy", "NewUserConn"]
 1. **先固定兼容样例。** 从现有客户端请求生成发布、续期、删除的样例，再从旧服务提取列表和人数的响应结构。把第 6.3 节五个路由写成可重复的接口测试。保留现有默认值、字段类型、文本长度边界和客户端依赖的错误结构。
 2. **新增数据库迁移。** 在 `0001_diagnostics` 后追加 `rooms` 与 `online_users` 的 Alembic 迁移。用 `full_room_code` 做房间主键，为 `updated_at` 和 `last_heartbeat` 加索引。保留服务端探测得到的有效版本和简介，续期时更新房间时间。验证新库启动、已有库升级和重复启动，确认原诊断记录仍可读取。
 3. **在 `control/` 中接上五个路由。** 复用旧大厅的请求结构、公开房间筛选和 IP 脱敏规则。在短事务内完成防多开检查和房间写入，按键删除并处理重复请求。按旧服务的 10 秒房间过期阈值和 60 秒清理周期验证续期与回收，同时单独验证 15 秒的在线窗口。数据库事务只涵盖本地操作，Minecraft 状态探测使用独立超时。
-4. **接入可控的 Minecraft Java Status 探测。** 本地验证使用预配置的测试主机和端口。先校验目标是否允许，再执行探测。用固定测试服务覆盖合法状态、超时和非 Minecraft 响应。公网切换前再确定正式节点允许范围，以及旧客户端只有 `node_id`、`remote_port` 时如何验证删除操作归属。
+4. **接入可控的 Minecraft Java Status 探测。** 本地验证使用预配置的测试主机和端口。先校验目标是否允许，再执行探测。用固定测试服务覆盖合法状态、超时和非 Minecraft 响应。公网切换前再确定正式节点的允许端口范围。
 5. **用现有客户端回归。** 设置 `MINECRAFTTOOLS_LOBBY_URL=http://127.0.0.1:8765/api/lobby`，使用测试节点发布房间。在大厅刷新后确认只出现一条记录，续期后仍可见，停止映射后房间消失。接口测试另外覆盖私有房间、重复删除、心跳超时和拒绝未经配置的探测目标。最后重跑 Launcher 的健康检查和诊断测试，验证大厅逻辑与 Launcher 根路径可以同时运行。
 
 本地验收以干净测试库和已执行 `0001_diagnostics` 的测试库各通过一次为准。旧 `server/` 继续作为兼容对照，生产大厅的迁移和切换在本地验收之后单独验证。

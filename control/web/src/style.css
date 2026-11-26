@@ -245,6 +245,7 @@ a {
 }
 
 .resource-table tbody tr:last-child td { border-bottom: 0; }
+.resource-table td .console-button + .console-button { margin-left: 6px; }
 
 .tunnel-row-actions { margin: 0; }
 .scan-history { margin-top: 16px; }

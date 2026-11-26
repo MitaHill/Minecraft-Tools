@@ -3,6 +3,7 @@ from time import time, time_ns
 from sqlalchemy import Boolean, Column, Float, Integer, String, Table, func, or_, select, update
 
 from .database import metadata
+from .node_ports import apply_pending, clear_pending, has_pending, requested_ranges
 from .registry import nodes, tunnels
 
 settings = Table(
@@ -99,11 +100,14 @@ def node_policy(database, node_id):
                 .order_by(blacklist.c.ip)
             ).mappings()
             payload["blacklist"] = {"revision": revision, "entries": list(map(dict, entries))}
-        payload["range"] = {
-            "revision": node["range_revision"],
-            "start": node["pending_port_start"] or node["port_start"],
-            "end": node["pending_port_end"] or node["port_end"],
-        }
+        ranges = requested_ranges(connection, node_id)
+        if ranges:
+            payload["range"] = {
+                "revision": node["range_revision"],
+                "start": ranges[0][0],
+                "end": ranges[-1][1],
+                "ranges": [list(item) for item in ranges],
+            }
         return payload
 
 
@@ -120,17 +124,25 @@ def acknowledge_policy(database, node_id, kind, revision, error):
                 )
             )
             return
-        values = {"range_error": error or None}
-        if not error:
-            values.update(port_start=nodes.c.pending_port_start, port_end=nodes.c.pending_port_end)
-        else:
-            # A rejected request keeps its revision. Agents ignore older successful ACKs.
-            values["range_revision"] = nodes.c.range_revision + 1
+        pending = has_pending(connection, node_id)
         match = (nodes.c.id == node_id) & (nodes.c.range_revision == revision)
-        changed = connection.execute(
-            update(nodes)
-            .where(match, nodes.c.pending_port_start.is_not(None))
-            .values(pending_port_start=None, pending_port_end=None, **values)
-        )
-        if error and not changed.rowcount:
-            connection.execute(update(nodes).where(match).values(range_error=error or None))
+        if not error:
+            applied = connection.execute(
+                update(nodes).where(match).values(range_error=None)
+            ).rowcount
+            if applied and pending:
+                apply_pending(connection, node_id)
+            return
+        if pending:
+            # A rejected request keeps its revision. Agents ignore older successful ACKs.
+            rejected = connection.execute(
+                update(nodes)
+                .where(match)
+                .values(
+                    range_revision=nodes.c.range_revision + 1, range_error=error
+                )
+            ).rowcount
+            if rejected:
+                clear_pending(connection, node_id)
+                return
+        connection.execute(update(nodes).where(match).values(range_error=error))

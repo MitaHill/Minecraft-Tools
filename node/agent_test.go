@@ -167,8 +167,10 @@ func TestAllowedPortsIntersectAndPreserveGaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !inDeployedRange(ports, 30001, 30003) || !inDeployedRange(ports, 30008, 30010) ||
-		inDeployedRange(ports, 30003, 30008) || inDeployedRange(ports, 30000, 30002) {
+	if !inDeployedRange(ports, [][2]int{{30001, 30003}}) ||
+		!inDeployedRange(ports, [][2]int{{30008, 30010}}) ||
+		inDeployedRange(ports, [][2]int{{30003, 30008}}) ||
+		inDeployedRange(ports, [][2]int{{30000, 30002}}) {
 		t.Fatalf("incorrect deployed ranges: %v", ports)
 	}
 }

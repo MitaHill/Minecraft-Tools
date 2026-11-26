@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from sqlalchemy import select
+from support import seed_node
 
 from app.database import audit_logs, open_database
 from app.node_hub import NodeHub, server_tls
@@ -110,15 +111,12 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.db.dispose)
         self.secret = "random node test secret"
         with self.db.begin() as connection:
-            connection.execute(
-                nodes.insert().values(
-                    id="test-node",
-                    name="Test Node",
-                    public_host="node.test",
-                    port_start=30001,
-                    port_end=30002,
-                    token_hash=sha256(self.secret.encode()).hexdigest(),
-                )
+            seed_node(
+                connection,
+                "test-node",
+                name="Test Node",
+                public_host="node.test",
+                token_hash=sha256(self.secret.encode()).hexdigest(),
             )
         self.hub = NodeHub(self.db)
         await self.hub.start("127.0.0.1", 0, server_tls(self.cert, self.key))

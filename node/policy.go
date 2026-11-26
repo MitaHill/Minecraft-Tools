@@ -16,9 +16,37 @@ import (
 )
 
 type portRangePolicy struct {
-	Revision int64 `json:"revision"`
-	Start    int   `json:"start"`
-	End      int   `json:"end"`
+	Revision int64    `json:"revision"`
+	Start    int      `json:"start"`
+	End      int      `json:"end"`
+	Ranges   [][2]int `json:"ranges,omitempty"`
+}
+
+func (policy portRangePolicy) effectiveRanges() [][2]int {
+	if len(policy.Ranges) > 0 {
+		return policy.Ranges
+	}
+	return [][2]int{{policy.Start, policy.End}}
+}
+
+func portInRanges(ranges [][2]int, port int) bool {
+	return slices.ContainsFunc(ranges, func(item [2]int) bool {
+		return item[0] <= port && port <= item[1]
+	})
+}
+
+func mergePortRanges(ranges [][2]int) [][2]int {
+	sorted := slices.Clone(ranges)
+	slices.SortFunc(sorted, func(a, b [2]int) int { return a[0] - b[0] })
+	merged := make([][2]int, 0, len(sorted))
+	for _, item := range sorted {
+		if n := len(merged); n > 0 && item[0] <= merged[n-1][1]+1 {
+			merged[n-1][1] = max(item[1], merged[n-1][1])
+		} else {
+			merged = append(merged, item)
+		}
+	}
+	return merged
 }
 
 type ipBan struct {
@@ -79,10 +107,16 @@ func allowedPorts(physicalStart, physicalEnd int, configured string) ([][2]int, 
 	return merged, nil
 }
 
-func inDeployedRange(ports [][2]int, start, end int) bool {
-	return slices.ContainsFunc(ports, func(allowed [2]int) bool {
-		return allowed[0] <= start && start <= end && end <= allowed[1]
-	})
+func inDeployedRange(ports [][2]int, ranges [][2]int) bool {
+	deployed := mergePortRanges(ports)
+	for _, item := range ranges {
+		if !slices.ContainsFunc(deployed, func(allowed [2]int) bool {
+			return allowed[0] <= item[0] && item[1] <= allowed[1]
+		}) {
+			return false
+		}
+	}
+	return true
 }
 
 func (agent *Agent) loadPolicy() error {
@@ -118,10 +152,11 @@ func (agent *Agent) replacePolicy(next nodePolicy) error {
 func (agent *Agent) applyRange(ctx context.Context, policy portRangePolicy, ports [][2]int) error {
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
-	if !inDeployedRange(ports, policy.Start, policy.End) {
+	ranges := policy.effectiveRanges()
+	if !inDeployedRange(ports, ranges) {
 		return errors.New("范围超出 frps 与 Docker 已部署的端口")
 	}
-	if previous := agent.policy.Range; previous != nil && *previous == policy {
+	if previous := agent.policy.Range; previous != nil && previous.Revision == policy.Revision {
 		agent.policyReady = true
 		return nil
 	}
@@ -129,7 +164,7 @@ func (agent *Agent) applyRange(ctx context.Context, policy portRangePolicy, port
 	if err != nil {
 		return fmt.Errorf("读取 frps 映射: %w", err)
 	}
-	excluded := func(port int) bool { return port < policy.Start || port > policy.End }
+	excluded := func(port int) bool { return !portInRanges(ranges, port) }
 	conflicts := make(map[int]bool)
 	for _, proxy := range active {
 		if proxy.Status == "online" && excluded(proxy.Config.RemotePort) {

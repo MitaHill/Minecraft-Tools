@@ -26,6 +26,7 @@ from .moderation import (
     lock_settings,
     node_policy,
 )
+from .node_ports import load_ranges
 from .registry import blocks, nodes, tunnel_claims, tunnels
 from .tunnel_commands import acknowledge_command, next_command
 
@@ -295,7 +296,11 @@ class NodeHub:
         if len(names) != len(items) or len(ports) != len(items):
             raise ProtocolError("duplicate proxy name or port")
         deployed = node.get("deployed_ports")
-        allowed = deployed if deployed is not None else [(node["port_start"], node["port_end"])]
+        if deployed is None:
+            with self.database.connect() as connection:
+                allowed = load_ranges(connection, node["id"])
+        else:
+            allowed = deployed
         if any(not any(start <= port <= end for start, end in allowed) for port in ports):
             raise ProtocolError("proxy outside configured port range")
         node_id = node["id"]

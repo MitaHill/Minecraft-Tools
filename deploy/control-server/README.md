@@ -45,11 +45,26 @@ ssh phoenix 'cd /opt/minecraft-tools/control-server && ./deploy.sh 2026-11-26-2'
 
 `deploy.sh` 做四件事：拉新标签、把 `CONTROL_IMAGE_TAG` 写进 `deploy.env`、`up -d --no-build`
 重建、等容器变成 `healthy`（最多 60 秒）。成功打印 `control is healthy on <tag>` 并清理悬空镜像；
-失败打印最近 50 行日志并把标签退回上一版。
+失败打印最近 50 行日志并把标签退回上一版；带 `--no-rollback` 时只打印提示，不自动退回。
+
+### 单向迁移（0011）
+
+`0011_node_port_ranges` 会把节点的端口范围迁移到 `node_port_ranges` 表并删除 `nodes` 的旧列。
+旧镜像查询不到这些列，迁移之后不能直接回退镜像。发布前先做在线备份，并用 `--no-rollback` 部署：
+
+```sh
+ssh phoenix "docker exec minecrafttools-integration-control-1 python -c 'import sqlite3; sqlite3.connect(\"/data/control.db\").execute(\"VACUUM INTO /data/control-backup.db\")'"
+ssh phoenix 'cd /opt/minecraft-tools/control-server && ./deploy.sh <tag> --no-rollback'
+```
+
+健康检查失败时容器保持新镜像，先看日志；需要回退时先停容器、用备份覆盖 `/data/control.db`，
+再执行 `./deploy.sh <上一版标签>`。备份文件留在 `control-data` 卷里，不会随镜像删除。
 
 ## 滚动更新 Agent
 
-先部署 Control Server。对每个节点记录并备份当前镜像覆盖文件，拉取同一版本的 `kindmitaishere/minecrafttools-frp-agent`，将覆盖文件里的 `agent` 与 `firewall` 指向该标签。沿用该节点的 Compose 项目名、环境和覆盖文件。以香港 dev 为例：
+发布包含多段允许端口策略的版本时，先按本节升级所有节点 Agent，再部署 Control Server；新 Agent 兼容旧控制端下发的单段策略。
+
+节点更新按以下步骤执行。对每个节点记录并备份当前镜像覆盖文件，拉取同一版本的 `kindmitaishere/minecrafttools-frp-agent`，将覆盖文件里的 `agent` 与 `firewall` 指向该标签。沿用该节点的 Compose 项目名、环境和覆盖文件。以香港 dev 为例：
 
 ```sh
 cd /srv/minecrafttools-hk-dev
@@ -83,8 +98,8 @@ ssh phoenix 'docker logs minecrafttools-integration-control-1 2>&1 | grep "WebSo
 ssh phoenix 'cd /opt/minecraft-tools/control-server && ./deploy.sh <上一版标签>'
 ```
 
-镜像在 Docker Hub 上就能重新拉回来。数据库迁移不会自动回退，跨迁移版本回滚前先确认
-迁移是向后兼容的。
+镜像在 Docker Hub 上就能重新拉回来。数据库迁移不会自动回退；跨破坏性迁移（例如 0011）回滚前
+必须先停容器、恢复迁移前的 SQLite 备份，否则旧镜像读不到已删除的列。
 
 ## 注意
 

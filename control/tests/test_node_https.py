@@ -5,9 +5,9 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from support import seed_node
 
 from app.main import app
-from app.registry import nodes
 
 
 class NodeHTTPSTests(unittest.TestCase):
@@ -30,11 +30,13 @@ class NodeHTTPSTests(unittest.TestCase):
             },
         }
         with app.state.database.begin() as db:
-            db.execute(nodes.insert().values(
-                id="https-node", name="HTTPS test", public_host="games.example.test",
-                port_start=30001, port_end=30002,
+            seed_node(
+                db,
+                "https-node",
+                name="HTTPS test",
+                public_host="games.example.test",
                 token_hash=sha256(b"https-test-secret").hexdigest(),
-            ))
+            )
 
     def test_https_node_enrolls_and_sends_snapshot_and_heartbeat(self):
         with self.client.websocket_connect(self.endpoint) as socket:

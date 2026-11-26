@@ -16,13 +16,14 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import URL, create_engine
+from support import seed_node
 
 from app.admin import Account, current_account
 from app.java_probe import Status
 from app.lobby import cleanup, rooms
 from app.main import app
 from app.node_hub import NodeHub, Proxy
-from app.registry import nodes, tunnels
+from app.registry import tunnels
 from app.tunnel_commands import acknowledge_command, enqueue_command, next_command
 
 
@@ -159,14 +160,19 @@ class LobbyTests(unittest.TestCase):
     def test_managed_publication_uses_live_claim_and_registered_probe_target(self):
         database = app.state.database
         with database.begin() as connection:
-            connection.execute(nodes.insert().values(
-                id="a", name="Lab", public_host="127.0.0.1", status="online",
-                port_start=self.port, port_end=self.port, token_hash="fixture",
-            ))
+            seed_node(
+                connection,
+                "a",
+                ranges=((self.port, self.port),),
+                name="Lab",
+                public_host="127.0.0.1",
+                client_channel="both",
+                server_port=7000,
+            )
         credentials = self.http.post("/api/v1/installs/register").json()
         headers = {"Authorization": "Bearer " + credentials["token"]}
         claim = self.http.post("/api/v1/tunnels/register", headers=headers, json={
-            "node_id": "a", "remote_port": self.port,
+            "node_id": "a",
         }).json()
         room = {**self.room, "publication_id": "a" * 32, "claim_id": claim["id"]}
         denied = self.http.post("/api/v1/lobby/rooms", headers=headers, json=room)
@@ -223,16 +229,13 @@ class LobbyTests(unittest.TestCase):
     def test_block_pending_unlists_and_refuses_renewal_before_firewall_ack(self):
         database = app.state.database
         with database.begin() as connection:
-            connection.execute(
-                nodes.insert().values(
-                    id="test-node",
-                    name="Test Node",
-                    public_host="127.0.0.1",
-                    port_start=self.port,
-                    port_end=self.port,
-                    token_hash="test-token-hash",
-                    status="online",
-                )
+            seed_node(
+                connection,
+                "test-node",
+                ranges=((self.port, self.port),),
+                name="Test Node",
+                public_host="127.0.0.1",
+                token_hash="test-token-hash",
             )
             connection.execute(
                 tunnels.insert().values(
@@ -354,6 +357,46 @@ class LobbyTests(unittest.TestCase):
 
 
 class MigrationTests(unittest.TestCase):
+    def test_node_port_ranges_move_into_their_own_table(self):
+        home = Path(self.enterContext(TemporaryDirectory()))
+        engine = create_engine(URL.create("sqlite", database=str(home / "control.db")))
+        self.addCleanup(engine.dispose)
+        migration = Config()
+        migration.set_main_option("script_location", "app:migrations")
+        with engine.begin() as connection:
+            migration.attributes["connection"] = connection
+            command.upgrade(migration, "0010_client_node_catalog")
+            connection.exec_driver_sql(
+                """INSERT INTO nodes (
+                    id, name, public_host, port_start, port_end,
+                    pending_port_start, pending_port_end, token_hash
+                ) VALUES ('a', 'A', 'a.example', 30001, 30002, 30005, 30006, 'fixture')"""
+            )
+            connection.exec_driver_sql(
+                """INSERT INTO nodes (id, name, public_host, port_start, port_end, token_hash)
+                   VALUES ('b', 'B', 'b.example', 31000, 31000, 'fixture')"""
+            )
+            command.upgrade(migration, "0011_node_port_ranges")
+            columns = {
+                row[1] for row in connection.exec_driver_sql("PRAGMA table_info(nodes)")
+            }
+            self.assertFalse(
+                {"port_start", "port_end", "pending_port_start", "pending_port_end"}
+                & columns
+            )
+            rows = connection.exec_driver_sql(
+                "SELECT node_id, pending, start_port, end_port FROM node_port_ranges "
+                "ORDER BY node_id, pending"
+            ).all()
+            self.assertEqual(
+                rows,
+                [
+                    ("a", 0, 30001, 30002),
+                    ("a", 1, 30005, 30006),
+                    ("b", 0, 31000, 31000),
+                ],
+            )
+
     def test_upgrade_preserves_an_existing_diagnostics_database(self):
         home = Path(self.enterContext(TemporaryDirectory()))
         engine = create_engine(URL.create("sqlite", database=str(home / "control.db")))
@@ -401,5 +444,5 @@ class MigrationTests(unittest.TestCase):
                     report = connection.exec_driver_sql(
                         "SELECT report FROM diagnostics"
                     ).scalar_one()
-                self.assertEqual(revision, "0010_client_node_catalog")
+                self.assertEqual(revision, "0011_node_port_ranges")
                 self.assertEqual(json.loads(report), {"stage": "ready"})
