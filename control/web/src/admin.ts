@@ -4,6 +4,12 @@ import { account } from './session'
 
 export const canOperate = computed(() => account.value?.role === 'operator' || account.value?.role === 'superadmin')
 
+export class AdminRequestError extends Error {
+  constructor(message: string, readonly detail: unknown) {
+    super(message)
+  }
+}
+
 export function useAdmin() {
   const route = useRoute()
   const router = useRouter()
@@ -24,7 +30,7 @@ export function useAdmin() {
     if (!response.ok) {
       if (typeof body.detail === 'string') throw new Error(body.detail)
       if (Array.isArray(body.detail)) throw new Error('请检查输入内容。')
-      throw new Error(`请求失败（${response.status}）`)
+      throw new AdminRequestError(`请求失败（${response.status}）`, body.detail)
     }
     return body as T
   }

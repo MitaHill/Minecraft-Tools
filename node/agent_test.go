@@ -151,6 +151,9 @@ func TestLoginBlacklistExpiresAndNormalizesAddress(t *testing.T) {
 		{IP: "192.0.2.8", Reason: "blocked"},
 		{IP: "2001:db8::8", Reason: "expired", ExpiresAt: &expired},
 	}}
+	if err := agent.policy.Blacklist.parseEntries(); err != nil {
+		t.Fatal(err)
+	}
 	if !callPlugin(t, agent, "Login", `{"content":{"client_address":"[::ffff:192.0.2.8]:23456"}}`) {
 		t.Fatal("blacklisted IPv4 address was accepted as an IPv4-mapped IPv6 address")
 	}
@@ -167,5 +170,34 @@ func TestAllowedPortsIntersectAndPreserveGaps(t *testing.T) {
 	if !inDeployedRange(ports, 30001, 30003) || !inDeployedRange(ports, 30008, 30010) ||
 		inDeployedRange(ports, 30003, 30008) || inDeployedRange(ports, 30000, 30002) {
 		t.Fatalf("incorrect deployed ranges: %v", ports)
+	}
+}
+
+func TestBlacklistCIDRChoosesMostSpecificActiveRule(t *testing.T) {
+	expired := float64(time.Now().Add(-time.Minute).Unix())
+	policy := &blacklistPolicy{Entries: []ipBan{
+		{IP: "192.0.2.0/24", Reason: "subnet"},
+		{IP: "192.0.2.8", Reason: "host"},
+		{IP: "192.0.2.9", Reason: "expired", ExpiresAt: &expired},
+		{IP: "2001:db8::/32", Reason: "ipv6 subnet"},
+		{IP: "::/0", Reason: "any IPv6"},
+	}}
+	if err := policy.parseEntries(); err != nil {
+		t.Fatal(err)
+	}
+	agent := &Agent{policy: nodePolicy{Blacklist: policy}}
+	for _, example := range []struct {
+		ip   string
+		want string
+	}{
+		{"::ffff:192.0.2.8", "host"},
+		{"192.0.2.9", "subnet"},
+		{"192.0.3.8", ""},
+		{"2001:db8::8", "ipv6 subnet"},
+		{"2001:db9::8", "any IPv6"},
+	} {
+		if got := agent.blockedIP(example.ip); got != example.want {
+			t.Errorf("blockedIP(%q) = %q, want %q", example.ip, got, example.want)
+		}
 	}
 }

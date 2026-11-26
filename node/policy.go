@@ -25,6 +25,7 @@ type ipBan struct {
 	IP        string   `json:"ip"`
 	Reason    string   `json:"reason"`
 	ExpiresAt *float64 `json:"expires_at"`
+	network   netip.Prefix
 }
 
 type blacklistPolicy struct {
@@ -96,6 +97,11 @@ func (agent *Agent) loadPolicy() error {
 	if err := json.Unmarshal(body, &policy); err != nil {
 		return fmt.Errorf("read cached node policy: %w", err)
 	}
+	if policy.Blacklist != nil {
+		if err := policy.Blacklist.parseEntries(); err != nil {
+			return fmt.Errorf("read cached node policy: %w", err)
+		}
+	}
 	agent.policy = policy
 	agent.policyReady = policy.Range != nil
 	return nil
@@ -150,6 +156,23 @@ func (agent *Agent) applyRange(ctx context.Context, policy portRangePolicy, port
 	return nil
 }
 
+func (policy *blacklistPolicy) parseEntries() error {
+	for i := range policy.Entries {
+		entry := &policy.Entries[i]
+		if address := normalizedIP(entry.IP); address != "" {
+			ip := netip.MustParseAddr(address)
+			entry.network = netip.PrefixFrom(ip, ip.BitLen())
+			continue
+		}
+		prefix, err := netip.ParsePrefix(entry.IP)
+		if err != nil || prefix != prefix.Masked() || prefix.Addr().Is4In6() {
+			return fmt.Errorf("invalid blacklist target %q", entry.IP)
+		}
+		entry.network = prefix
+	}
+	return nil
+}
+
 func (entry ipBan) active(now float64) bool {
 	return entry.ExpiresAt == nil || *entry.ExpiresAt > now
 }
@@ -164,20 +187,30 @@ func (agent *Agent) hasActiveBlacklist() bool {
 	})
 }
 
-func (agent *Agent) blockedIP(ip string) string {
+func (agent *Agent) blockedIP(address string) string {
 	if agent.policy.Blacklist == nil {
 		return ""
 	}
+	ip, err := netip.ParseAddr(address)
+	if err != nil || ip.Zone() != "" {
+		return ""
+	}
+	ip = ip.Unmap()
 	now := float64(time.Now().UnixMilli()) / 1000
+	best := -1
+	reason := ""
 	for _, entry := range agent.policy.Blacklist.Entries {
-		if entry.IP == ip && entry.active(now) {
-			return entry.Reason
+		if entry.network.Bits() > best && entry.active(now) && entry.network.Contains(ip) {
+			best, reason = entry.network.Bits(), entry.Reason
 		}
 	}
-	return ""
+	return reason
 }
 
 func (agent *Agent) applyBlacklist(ctx context.Context, policy blacklistPolicy) error {
+	if err := policy.parseEntries(); err != nil {
+		return err
+	}
 	agent.mu.Lock()
 	next := agent.policy
 	next.Blacklist = &policy
@@ -186,11 +219,16 @@ func (agent *Agent) applyBlacklist(ctx context.Context, policy blacklistPolicy) 
 	if err != nil || len(policy.Entries) == 0 {
 		return err
 	}
-	clients, err := agent.dashboard.activeClients(ctx)
+
+	// Leave enough time for the next heartbeat even if a broad rule matches many sockets.
+	batch, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	clients, err := agent.dashboard.activeClients(batch)
 	if err != nil {
 		return err
 	}
 	seen := make(map[string]bool)
+	var firstError error
 	for _, ip := range clients {
 		if seen[ip] {
 			continue
@@ -199,15 +237,22 @@ func (agent *Agent) applyBlacklist(ctx context.Context, policy blacklistPolicy) 
 		agent.mu.Lock()
 		blocked := agent.blockedIP(ip) != ""
 		agent.mu.Unlock()
-		if blocked {
-			if _, err := firewallCall(ctx, agent.firewallSocket, FirewallRequest{
-				Action: "disconnect-client", ClientIP: ip,
-			}); err != nil {
-				return err
-			}
+		if !blocked {
+			continue
+		}
+		if err := batch.Err(); err != nil {
+			return fmt.Errorf("remaining blacklist connections will be retried: %w", err)
+		}
+		attempt, stop := context.WithTimeout(batch, 4*time.Second)
+		_, err := firewallCall(attempt, agent.firewallSocket, FirewallRequest{
+			Action: "disconnect-client", ClientIP: ip,
+		})
+		stop()
+		if err != nil && firstError == nil {
+			firstError = err
 		}
 	}
-	return nil
+	return firstError
 }
 
 func (agent *Agent) checkLogin(address string) string {

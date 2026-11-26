@@ -110,6 +110,8 @@ docker compose -f control/compose.yaml -p minecrafttools-test cp \
 
 `CONTROL_SCANNER_ENABLED=1` 启用扫描器。默认在宽限期后连续三次检测为非 Minecraft 才下发封禁。操作员可在隧道页面查看检测记录、发起重扫和封禁隧道，也可在黑名单页面解除封禁。
 
-Agent 上线后报告已发布的节点端口与 frps `allowPorts` 的交集。管理台在该范围内调整已登记的端口，Agent 确认后才生效。扩展部署范围时同步更新节点 Docker 配置、frps `allowPorts` 和 Agent 的环境变量，再让 Agent 重新注册连接。IPv4 和 IPv6 都以 frps 看到的连接来源为准。所有受控节点都要先升级 Agent 和 firewall-helper，局部升级期间仍可执行单隧道封禁。
+Agent 上线后报告已发布的节点端口与 frps `allowPorts` 的交集。管理台在该范围内调整已登记的端口，Agent 确认后才生效。扩展部署范围时同步更新节点 Docker 配置、frps `allowPorts` 和 Agent 的环境变量，再让 Agent 重新注册连接。IPv4 和 IPv6 都以 frps 看到的连接来源为准。黑名单页面支持手动添加单个 IP 或 CIDR，并逐条解除。填写 `0.0.0.0/0` 或 `::/0` 时需要额外确认。所有受控节点都要先升级 Agent 和 firewall-helper，局部升级期间仍可执行单隧道封禁。
+
+先升级 Control Server，再更新所有已登记的 Agent。节点上报 CIDR 能力后才能添加网段规则。回退到旧版本前，先解除生效中的 CIDR 并确认各节点已经同步。
 
 公开大厅关闭时，现有发布可续期，重新开放后仍有效的房间继续展示。单独下架的房间需要房主手动重新发布。新版受控客户端可用当前隧道凭据发布，旧客户端继续使用配置中的大厅探测目标。Phoenix 和香港节点的实际测试、客户端状态联动和发布计划见[控制端实施计划](../docs/control-server.md#13-分阶段实施)。

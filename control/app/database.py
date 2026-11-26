@@ -19,6 +19,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Connection, Engine
 
+from .ip_rules import rule_prefix
+
 metadata = MetaData()
 diagnostics = Table(
     "diagnostics",
@@ -62,6 +64,7 @@ def open_database(data_dir: Path) -> Engine:
 
     @event.listens_for(engine, "connect")
     def configure_sqlite(connection, _record):
+        connection.create_function("ip_rule_prefix", 2, rule_prefix, deterministic=True)
         # SQLite requires these PRAGMAs outside a transaction.
         connection.autocommit = True
         cursor = connection.cursor()

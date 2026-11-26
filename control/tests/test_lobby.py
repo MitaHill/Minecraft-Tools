@@ -376,6 +376,12 @@ class MigrationTests(unittest.TestCase):
                           'node.example', ?, '192.0.2.8')""",
                 (time(),),
             )
+            command.upgrade(migration, "0008_moderation")
+            connection.exec_driver_sql(
+                """INSERT INTO ip_blacklist (ip, reason, actor, created_at)
+                   VALUES ('192.0.2.8', 'existing rule', 'operator', ?)""",
+                (time(),),
+            )
         self.enterContext(patch.dict("os.environ", {"CONTROL_DATA_DIR": str(home)}))
         for _ in range(2):
             with TestClient(app) as http:
@@ -388,8 +394,12 @@ class MigrationTests(unittest.TestCase):
                     revision = connection.exec_driver_sql(
                         "SELECT version_num FROM alembic_version"
                     ).scalar_one()
+                    old_blacklist = connection.exec_driver_sql(
+                        "SELECT ip, reason FROM ip_blacklist"
+                    ).one()
+                    self.assertEqual(old_blacklist, ("192.0.2.8", "existing rule"))
                     report = connection.exec_driver_sql(
                         "SELECT report FROM diagnostics"
                     ).scalar_one()
-                self.assertEqual(revision, "0008_moderation")
+                self.assertEqual(revision, "0009_cidr_blacklist")
                 self.assertEqual(json.loads(report), {"stage": "ready"})

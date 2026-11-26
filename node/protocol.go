@@ -74,7 +74,7 @@ func newControlConnection(address, caFile, certFile, keyFile, nodeID, secret, fr
 	}
 	return &ControlConnection{address: parsed.Host, endpoint: endpoint, tls: config, hello: map[string]any{
 		"protocol_version": 1, "node_id": nodeID, "secret": secret,
-		"agent_version": version, "frps_version": frpsVersion,
+		"agent_version": version, "frps_version": frpsVersion, "blacklist_cidr": true,
 	}}, nil
 }
 

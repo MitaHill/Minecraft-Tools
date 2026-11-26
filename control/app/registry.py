@@ -31,6 +31,7 @@ nodes = Table(
     Column("range_revision", Integer, nullable=False, server_default="0"),
     Column("range_error", String),
     Column("blacklist_revision", Integer),
+    Column("blacklist_cidr", Boolean, nullable=False, server_default="0"),
     Column("blacklist_error", String),
 )
 

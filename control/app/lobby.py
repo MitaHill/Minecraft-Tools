@@ -33,8 +33,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
 from .database import metadata
+from .ip_rules import canonical_ip
 from .java_probe import probe
-from .moderation import canonical_ip, ip_block, live_tunnels, lock_settings, removals, settings
+from .moderation import ip_block, live_tunnels, lock_settings, removals, settings
 from .registry import blocks, installs, nodes, tunnel_claims, tunnels
 
 logger = logging.getLogger(__name__)

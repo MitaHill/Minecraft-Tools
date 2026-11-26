@@ -336,7 +336,8 @@ GET      /api/admin/tunnels?status=
 WS       /api/admin/tunnels/live
 POST     /api/admin/tunnels/{id}/block
 POST     /api/admin/tunnels/{id}/blacklist
-GET      /api/admin/blacklist
+GET/POST /api/admin/blacklist
+DELETE   /api/admin/blacklist?target=
 DELETE   /api/admin/blacklist/{ip}
 POST     /api/admin/tunnels/{id}/unblock
 POST     /api/admin/tunnels/{id}/rescan

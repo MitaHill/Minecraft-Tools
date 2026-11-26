@@ -17,7 +17,15 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from .moderation import acknowledge_policy, active_blacklist, blacklist, canonical_ip, node_policy
+from .ip_rules import canonical_ip
+from .moderation import (
+    acknowledge_policy,
+    active_blacklist,
+    active_cidr,
+    blacklist,
+    lock_settings,
+    node_policy,
+)
 from .registry import blocks, nodes, tunnel_claims, tunnels
 from .tunnel_commands import acknowledge_command, next_command
 
@@ -46,6 +54,7 @@ class Hello(BaseModel):
     frps_version: str = Field(min_length=1, max_length=80)
     public_host: str | None = Field(default=None, max_length=253)
     deployed_ports: list[tuple[int, int]] | None = Field(default=None, max_length=128)
+    blacklist_cidr: bool = Field(default=False, strict=True)
 
 
 class Proxy(BaseModel):
@@ -221,19 +230,26 @@ class NodeHub:
         query = select(nodes).where(nodes.c.id == hello.node_id)
         with self.database.connect() as connection:
             node = connection.execute(query).mappings().one_or_none()
-            needs_policy = hello.deployed_ports is None and connection.execute(
-                select(select(blacklist.c.ip).where(active_blacklist(time())).exists())
-            ).scalar_one()
         if node is None or not compare_digest(
             node["token_hash"], sha256(hello.secret.encode()).hexdigest()
         ):
             raise ProtocolError("authentication failed")
-        if needs_policy:
-            raise ProtocolError("node does not support the active IP blacklist")
         return node
 
     def set_online(self, hello: Hello):
         with self.database.begin() as connection:
+            lock_settings(connection)
+            now = time()
+            if hello.deployed_ports is None:
+                unsupported = active_blacklist(now)
+            elif not hello.blacklist_cidr:
+                unsupported = active_cidr(now)
+            else:
+                unsupported = None
+            if unsupported is not None and connection.execute(
+                select(select(blacklist.c.ip).where(unsupported).exists())
+            ).scalar_one():
+                raise ProtocolError("node does not support the active IP blacklist")
             connection.execute(
                 update(nodes)
                 .where(nodes.c.id == hello.node_id)
@@ -244,6 +260,7 @@ class NodeHub:
                     frps_version=hello.frps_version,
                     deployed_ports=hello.deployed_ports,
                     blacklist_revision=None,
+                    blacklist_cidr=hello.blacklist_cidr and hello.deployed_ports is not None,
                 )
             )
 

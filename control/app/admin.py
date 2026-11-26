@@ -21,11 +21,12 @@ from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocketDisconnect
 
 from .database import metadata, record_admin_action
+from .ip_rules import canonical_ip, canonical_rule
 from .lobby import live_rooms, rooms
 from .moderation import (
     active_blacklist,
     blacklist,
-    canonical_ip,
+    ip_matches,
     live_tunnels,
     lock_settings,
     removals,
@@ -74,11 +75,19 @@ class TunnelBlock(BaseModel):
     created_at: float | None = None
 
 
-class TunnelBlacklist(BaseModel):
-    run_id: str = Field(min_length=1, max_length=200)
-    created_at: float
+class BlacklistRule(BaseModel):
     reason: str = Field(min_length=1, max_length=200)
     duration: Literal["1h", "24h", "7d", "30d", "permanent"]
+
+
+class TunnelBlacklist(BlacklistRule):
+    run_id: str = Field(min_length=1, max_length=200)
+    created_at: float
+
+
+class ManualBlacklist(BlacklistRule):
+    target: str = Field(min_length=1, max_length=64)
+    confirm_all: bool = Field(default=False, strict=True)
 
 
 class LobbyToggle(BaseModel):
@@ -502,13 +511,58 @@ async def watch_tunnels(socket: WebSocket):
 DURATIONS = {"1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000}
 
 
-@router.post("/tunnels/{tunnel_id}/blacklist", status_code=202, dependencies=[Depends(same_origin)])
-def blacklist_tunnel(tunnel_id: str, payload: TunnelBlacklist, request: Request, account: Operator):
-    now = time()
+def add_blacklist_rule(connection, target, payload, actor, now):
     reason = payload.reason.strip()
     if not reason:
         raise HTTPException(422, "请输入封禁理由")
+    if connection.execute(
+        select(blacklist.c.ip).where(blacklist.c.ip == target, active_blacklist(now))
+    ).first():
+        raise HTTPException(409, "此 IP 或网段已有生效中的规则")
+    unsupported = nodes.c.deployed_ports.is_(None)
+    if "/" in target:
+        unsupported |= nodes.c.blacklist_cidr.is_(False)
+    pending = connection.execute(select(nodes.c.id).where(unsupported).order_by(nodes.c.id)).scalars().all()
+    if pending:
+        raise HTTPException(409, "以下节点尚未支持此规则：" + "、".join(pending))
     duration = DURATIONS.get(payload.duration)
+    values = {
+        "reason": reason, "actor": actor, "created_at": now,
+        "expires_at": now + duration if duration else None, "removed_at": None,
+    }
+    connection.execute(
+        sqlite_insert(blacklist).values(ip=target, **values)
+        .on_conflict_do_update(index_elements=[blacklist.c.ip], set_=values)
+    )
+    affected = select(tunnels.c.id).where(ip_matches(target, tunnels.c.client_ip))
+    connection.execute(delete(rooms).where(
+        ip_matches(target, rooms.c.client_ip) | rooms.c.tunnel_id.in_(affected)
+    ))
+    connection.execute(update(settings).values(blacklist_revision=settings.c.blacklist_revision + 1))
+    record_admin_action(connection, actor, "blacklist.add", target)
+    return {"ip": target, "status": "pending"}
+
+
+@router.post("/blacklist", status_code=202, dependencies=[Depends(same_origin)])
+def create_blacklist(payload: ManualBlacklist, request: Request, account: Operator):
+    target = parse_blacklist_target(payload.target)
+    if target in ("0.0.0.0/0", "::/0") and not payload.confirm_all:
+        raise HTTPException(409, {"code": "confirm_all", "target": target})
+    with request.app.state.database.begin() as connection:
+        lock_settings(connection)
+        return add_blacklist_rule(connection, target, payload, account.username, time())
+
+
+def parse_blacklist_target(target: str):
+    try:
+        return canonical_rule(target)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+
+
+@router.post("/tunnels/{tunnel_id}/blacklist", status_code=202, dependencies=[Depends(same_origin)])
+def blacklist_tunnel(tunnel_id: str, payload: TunnelBlacklist, request: Request, account: Operator):
+    now = time()
     with request.app.state.database.begin() as connection:
         lock_settings(connection)
         tunnel = connection.execute(
@@ -522,26 +576,7 @@ def blacklist_tunnel(tunnel_id: str, payload: TunnelBlacklist, request: Request,
         ip = canonical_ip(tunnel["client_ip"])
         if ip is None:
             raise HTTPException(409, "此隧道尚无可验证的客户端 IP")
-        unsupported = connection.execute(
-            select(nodes.c.id).where(nodes.c.deployed_ports.is_(None)).order_by(nodes.c.id)
-        ).scalars().all()
-        if unsupported:
-            raise HTTPException(409, "以下节点尚未同步策略能力：" + "、".join(unsupported))
-        values = {
-            "reason": reason, "actor": account.username, "created_at": now,
-            "expires_at": now + duration if duration else None, "removed_at": None,
-        }
-        connection.execute(
-            sqlite_insert(blacklist).values(ip=ip, **values)
-            .on_conflict_do_update(index_elements=[blacklist.c.ip], set_=values)
-        )
-        affected = select(tunnels.c.id).where(tunnels.c.client_ip == ip)
-        connection.execute(delete(rooms).where(
-            (rooms.c.client_ip == ip) | rooms.c.tunnel_id.in_(affected)
-        ))
-        connection.execute(update(settings).values(blacklist_revision=settings.c.blacklist_revision + 1))
-        record_admin_action(connection, account.username, "blacklist.add", ip)
-    return {"ip": ip, "status": "pending"}
+        return add_blacklist_rule(connection, ip, payload, account.username, now)
 
 
 @router.get("/blacklist")
@@ -565,9 +600,19 @@ def list_blacklist(request: Request, _account: SignedIn):
     return {"entries": entries, "blocks": blocked, "pending_nodes": pending_nodes}
 
 
+@router.delete("/blacklist", status_code=204, dependencies=[Depends(same_origin)])
+def remove_blacklist_rule(
+    request: Request, account: Operator, target: Annotated[str, Query(min_length=1, max_length=64)],
+):
+    expire_blacklist_rule(parse_blacklist_target(target), request, account)
+
+
 @router.delete("/blacklist/{ip}", status_code=204, dependencies=[Depends(same_origin)])
 def remove_blacklist(ip: str, request: Request, account: Operator):
-    address = canonical_ip(ip)
+    expire_blacklist_rule(canonical_ip(ip), request, account)
+
+
+def expire_blacklist_rule(address, request, account):
     now = time()
     with request.app.state.database.begin() as connection:
         removed = connection.execute(

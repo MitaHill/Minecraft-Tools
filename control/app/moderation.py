@@ -1,7 +1,6 @@
-from ipaddress import IPv6Address, ip_address
 from time import time
 
-from sqlalchemy import Boolean, Column, Float, Integer, String, Table, or_, select, update
+from sqlalchemy import Boolean, Column, Float, Integer, String, Table, func, or_, select, update
 
 from .database import metadata
 from .registry import nodes, tunnels
@@ -33,32 +32,30 @@ removals = Table(
 )
 
 
-def canonical_ip(value: str | None) -> str | None:
-    if not value or "%" in value:
-        return None
-    try:
-        address = ip_address(value)
-    except ValueError:
-        return None
-    if isinstance(address, IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    return str(address)
-
-
 def active_blacklist(now):
     return blacklist.c.removed_at.is_(None) & or_(
         blacklist.c.expires_at.is_(None), blacklist.c.expires_at > now
     )
 
 
+def active_cidr(now):
+    return active_blacklist(now) & blacklist.c.ip.contains("/")
+
+
+def ip_matches(rule, address):
+    return func.ip_rule_prefix(rule, address) >= 0
+
+
 def ip_block(connection, *ips):
-    addresses = {address for value in ips if (address := canonical_ip(value))}
+    addresses = set(filter(None, ips))
     if not addresses:
         return None
+    scores = [func.ip_rule_prefix(blacklist.c.ip, address) for address in sorted(addresses)]
+    specificity = scores[0] if len(scores) == 1 else func.max(*scores)
     return connection.execute(
         select(blacklist.c.reason)
-        .where(active_blacklist(time()), blacklist.c.ip.in_(addresses))
-        .order_by(blacklist.c.created_at.desc())
+        .where(active_blacklist(time()), specificity >= 0)
+        .order_by(specificity.desc(), blacklist.c.created_at.desc(), blacklist.c.ip)
         .limit(1)
     ).scalar_one_or_none()
 
@@ -69,7 +66,7 @@ def live_tunnels(now):
         & tunnels.c.proxy_present.is_(True)
         & tunnels.c.status.in_(("pending", "active"))
         & ~select(blacklist.c.ip)
-        .where(blacklist.c.ip == tunnels.c.client_ip, active_blacklist(now))
+        .where(ip_matches(blacklist.c.ip, tunnels.c.client_ip), active_blacklist(now))
         .exists()
     )
 
@@ -84,9 +81,12 @@ def node_policy(database, node_id):
         revision = connection.execute(select(settings.c.blacklist_revision)).scalar_one()
         payload = {}
         if node["blacklist_revision"] != revision:
+            rules = active_blacklist(time())
+            if not node["blacklist_cidr"]:
+                rules &= ~blacklist.c.ip.contains("/")
             entries = connection.execute(
                 select(blacklist.c.ip, blacklist.c.reason, blacklist.c.expires_at)
-                .where(active_blacklist(time()))
+                .where(rules)
                 .order_by(blacklist.c.ip)
             ).mappings()
             payload["blacklist"] = {"revision": revision, "entries": list(map(dict, entries))}

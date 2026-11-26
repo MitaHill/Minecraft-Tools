@@ -9,7 +9,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, select, update
 
-from .moderation import canonical_ip, ip_block, lock_settings
+from .ip_rules import canonical_ip
+from .moderation import ip_block, lock_settings
 from .registry import blocks, installs, nodes, tunnel_claims, tunnels
 
 router = APIRouter(prefix="/api/v1")
