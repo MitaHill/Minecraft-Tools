@@ -87,7 +87,7 @@ onMounted(load)
           <span>触发条数</span>
           <small class="field-hint">1–20 条</small>
         </span>
-        <small class="field-note">同一 IP 在统计窗口内累计达到这个条数后触发自动拉黑。</small>
+        <small class="field-note">同一 IP 在统计窗口内累计出现的无预约隧道达到这个条数后自动拉黑。</small>
         <input v-model.number="form.auto_ban_attempts" type="number" min="1" max="20" step="1" :disabled="busy || !canEdit">
       </label>
       <label class="settings-field">
