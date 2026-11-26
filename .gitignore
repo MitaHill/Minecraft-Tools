@@ -21,3 +21,6 @@ admin_config.json
 
 # Phoenix 部署环境（含端口与内网地址，不进仓库）
 deploy/control-server/deploy.env
+
+# 本地保存的截图与临时凭据
+/local/
