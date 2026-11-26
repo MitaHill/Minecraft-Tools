@@ -1,7 +1,8 @@
 FROM golang:1.26-bookworm AS build
+ARG VERSION=dev
 WORKDIR /node
 COPY go.mod go.sum *.go ./
-RUN CGO_ENABLED=0 go build -trimpath -o /frp-agent .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${VERSION}" -o /frp-agent .
 
 FROM fatedier/frps:v0.72.0 AS upstream-frps
 

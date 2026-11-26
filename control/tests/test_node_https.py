@@ -50,7 +50,7 @@ class NodeHTTPSTests(unittest.TestCase):
                 self.assertEqual(reply["type"], message["type"] + "_ack")
                 self.assertEqual(reply["seq"], message["seq"])
 
-    def test_declines_cleartext_socket_and_invalid_node_secret(self):
+    def test_declines_cleartext_socket_and_accepts_any_secret(self):
         with (
             self.assertRaises(WebSocketDisconnect),
             self.client.websocket_connect(self.endpoint.replace("wss:", "ws:")),
@@ -59,5 +59,20 @@ class NodeHTTPSTests(unittest.TestCase):
         self.hello["payload"]["secret"] = "invalid"
         with self.client.websocket_connect(self.endpoint) as socket:
             socket.send_json(self.hello)
-            with self.assertRaises(WebSocketDisconnect):
-                socket.receive_json()
+            reply = socket.receive_json()
+            self.assertEqual(reply["type"], "hello_ack")
+
+    def test_https_node_registers_without_secret(self):
+        hello = {
+            "type": "hello", "seq": 1, "payload": {
+                "protocol_version": 1,
+                "node_id": "auto-https-node",
+                "node_name": "HTTPS auto",
+                "agent_version": "test",
+                "frps_version": "test",
+                "deployed_ports": [[32000, 32001]],
+            },
+        }
+        with self.client.websocket_connect(self.endpoint) as socket:
+            socket.send_json(hello)
+            self.assertEqual(socket.receive_json()["type"], "hello_ack")

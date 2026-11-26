@@ -20,7 +20,7 @@ uv run --project control --locked --python 3.12 \
 
 ## 管理台前端
 
-前端位于 `control/web/`，使用 Vue 3、Vue Router、TypeScript、Vite 和 Element Plus。登录后可查看实时隧道、节点、在线统计、黑名单和公开联机大厅。节点创建、编辑和删除限超级管理员，封禁、拉黑、解除及大厅管理限超级管理员和运维。超级管理员可通过管理 API 创建节点，返回的新节点密钥仅出现一次。
+前端位于 `control/web/`，使用 Vue 3、Vue Router、TypeScript、Vite 和 Element Plus。登录后可查看实时隧道、节点、在线统计、黑名单和公开联机大厅。节点编辑和删除限超级管理员，封禁、拉黑、解除及大厅管理限超级管理员和运维。Agent 首次连接会自动建档，默认未发布；管理台不再需要创建节点或保管节点密钥。
 
 先按上文启动控制端，再在仓库根目录执行以下命令。需要 Node.js 22.12 或更高版本。
 
@@ -106,11 +106,11 @@ docker compose -f control/compose.yaml -p minecrafttools-test cp \
 
 ## 节点与扫描器
 
-启用 `compose.node-hub.yaml` 后配置节点 Hub 的证书目录、监听地址和端口。先在管理台登记节点，把首次返回的节点密钥和信任证书交给 Agent。节点端使用 [Compose](../node/compose.yaml)，封禁通过 helper 在共享网络命名空间执行。
+启用 `compose.node-hub.yaml` 后配置节点 Hub 的证书目录、监听地址和端口。新节点直接运行 [Agent 部署脚本](../deploy/agent/README.md)；Agent 自动生成节点 ID，控制端收到未知 ID 时自动建档，管理台确认公网地址、允许端口和发布通道即可。节点端使用 [Compose](../node/compose.yaml)，封禁通过 helper 在共享网络命名空间执行。
 
 `CONTROL_SCANNER_ENABLED=1` 启用扫描器。默认在宽限期后连续三次检测为非 Minecraft 才下发封禁。操作员可在隧道页面查看检测记录、发起重扫和封禁隧道，也可在黑名单页面解除封禁。
 
-Agent 上线后报告已发布的节点端口与 frps `allowPorts` 的交集。管理台用一个输入框配置节点的允许端口（逗号分隔、段内用横杠，例如 `30000-30010,31000`），必须在部署范围内，Agent 确认后才生效。多段端口需要新 Agent；旧 Agent 只按首尾范围校验。扩展部署范围时同步更新节点 Docker 配置、frps `allowPorts` 和 Agent 的环境变量，再让 Agent 重新注册连接。节点离线且没有实时映射、预留和生效封禁时可以在管理台删除，历史映射、封禁和扫描记录会一并清理。IPv4 和 IPv6 都以 frps 看到的连接来源为准。黑名单页面支持手动添加单个 IP 或 CIDR，并逐条解除。填写 `0.0.0.0/0` 或 `::/0` 时需要额外确认。所有受控节点都要先升级 Agent 和 firewall-helper，局部升级期间仍可执行单隧道封禁。
+Agent 上线后报告已发布的节点端口与 frps `allowPorts` 的交集。管理台用一个输入框配置节点的允许端口（逗号分隔、段内用横杠，例如 `30000-30010,30015`），必须在节点部署范围内，Agent 确认后才生效。多段端口需要新 Agent；旧 Agent 只按首尾范围校验。扩展部署范围时同步更新节点 Docker 配置、frps `allowPorts` 和 Agent 的环境变量，再让 Agent 重新注册连接，步骤见[节点端口容量](../docs/node-ports.md)。节点离线且没有实时映射、预留和生效封禁时可以在管理台删除，历史映射、封禁和扫描记录会一并清理。IPv4 和 IPv6 都以 frps 看到的连接来源为准。黑名单页面支持手动添加单个 IP 或 CIDR，并逐条解除。填写 `0.0.0.0/0` 或 `::/0` 时需要额外确认。所有受控节点都要先升级 Agent 和 firewall-helper，局部升级期间仍可执行单隧道封禁。
 
 先升级 Control Server，再更新所有已登记的 Agent。节点上报 CIDR 能力后才能添加网段规则。回退到旧版本前，先解除生效中的 CIDR 并确认各节点已经同步。
 

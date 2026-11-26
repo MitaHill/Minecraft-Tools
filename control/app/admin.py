@@ -121,7 +121,6 @@ class NodeConfiguration(BaseModel):
     allowed_ports: str = Field(min_length=1, max_length=MAX_TEXT)
     server_addr: str | None = Field(default=None, max_length=253)
     server_port: int | None = Field(default=None, ge=1, le=65535, strict=True)
-    frp_token: SecretStr | None = Field(default=None, max_length=1024)
     client_channel: Literal["hidden", "dev", "stable", "both"] = "hidden"
 
     @field_validator("public_host", "server_addr")
@@ -150,13 +149,10 @@ class NodeConfiguration(BaseModel):
         return self
 
     def client_config(self) -> dict:
-        values = self.model_dump(
-            include={"server_addr", "server_port", "frp_token", "client_channel"},
+        return self.model_dump(
+            include={"server_addr", "server_port", "client_channel"},
             exclude_unset=True,
         )
-        if "frp_token" in values and self.frp_token is not None:
-            values["frp_token"] = self.frp_token.get_secret_value() or None
-        return values
 
 
 class NodeRegistration(NodeConfiguration):
@@ -296,7 +292,6 @@ def logout(request: Request, response: Response):
 def list_nodes(request: Request, _account: SignedIn):
     query = select(
         *(column for column in nodes.c if column.name not in ("token_hash", "frp_token")),
-        nodes.c.frp_token.is_not(None).label("frp_token_configured"),
     ).order_by(nodes.c.id)
     with request.app.state.database.connect() as connection:
         active = ranges_by_node(connection)
@@ -320,16 +315,14 @@ def register_node(
         raise HTTPException(403, "Superadmin permission required")
     if payload.client_channel != "hidden" and payload.server_port is None:
         raise HTTPException(422, "发布线路前需要填写 frpc 连接端口")
-    token = token_urlsafe(32)
     ranges = parse_spec(payload.allowed_ports)
     statement = sqlite_insert(nodes).values(
         **payload.model_dump(exclude={
-            "name", "allowed_ports", "server_addr", "server_port", "frp_token",
-            "client_channel",
+            "name", "allowed_ports", "server_addr", "server_port", "client_channel",
         }),
         **payload.client_config(),
         name=payload.name.strip(),
-        token_hash=token_digest(token),
+        token_hash="",
     )
     statement = statement.on_conflict_do_nothing(index_elements=[nodes.c.id])
     with request.app.state.database.begin() as connection:
@@ -340,7 +333,7 @@ def register_node(
             touch_node_catalog(connection)
         record_admin_action(connection, account.username, "node.register", payload.id)
     response.headers["Cache-Control"] = "no-store"
-    return {"id": payload.id, "secret": token}
+    return {"id": payload.id}
 
 
 @router.get("/tunnels")
@@ -483,7 +476,11 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
             if deployed is None:
                 raise HTTPException(409, "节点 Agent 尚未同步部署端口范围")
             if not within(ranges, deployed):
-                raise HTTPException(422, "映射范围须在节点已部署的端口范围内")
+                raise HTTPException(
+                    422,
+                    f"映射范围须在节点已部署的端口范围内（当前 {format_spec(deployed)}）；"
+                    "扩大范围需调整节点 NODE_PORT_START/END 与 frps allowPorts 后重启 Agent",
+                )
             replace_ranges(connection, node_id, ranges, pending=True)
             values.update(range_revision=node["range_revision"] + 1, range_error=None)
         connection.execute(update(nodes).where(nodes.c.id == node_id).values(**values))

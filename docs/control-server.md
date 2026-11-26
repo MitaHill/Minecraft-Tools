@@ -118,7 +118,7 @@ Control Server 已实现 Launcher 接口、兼容大厅接口和管理台。启�
 
 | 服务 | 网络 | 端口 |
 | --- | --- | --- |
-| node-net | `minecrafttools-node` | 持有网络命名空间，发布 `7000` 和远程端口段，例如 `30000-30100` |
+| node-net | `minecrafttools-node` | 持有网络命名空间，发布 `7000` 和远程端口段，例如 `30000-30015` |
 | frps | `service:node-net` | 在共享命名空间监听控制端口、游戏端口和内部管理端口 |
 | agent | `minecrafttools-node` | 不发布端口；监听内部 `9000` 给 frps plugin |
 | firewall-helper | `service:node-net` | 通过共享卷里的 Unix socket 接收命令 |
@@ -127,7 +127,8 @@ Control Server 已实现 Launcher 接口、兼容大厅接口和管理台。启�
 
 - frps 的 `webServer` 只监听容器网络内部，例如 `0.0.0.0:7400`，不发布到宿主机公网。
 - agent 的 plugin 监听 `0.0.0.0:9000`，frps 通过 `agent:9000` 访问。
-- 首版沿用 1:1 端口映射，例如 `30000-30100:30000-30100`。helper 始终匹配 frps 的容器侧监听端口，采用非 1:1 映射时，控制端需分别记录公网端口和容器端口。
+- 首版沿用 1:1 端口映射，例如 `30000-30015:30000-30015`。helper 始终匹配 frps 的容器侧监听端口，采用非 1:1 映射时，控制端需分别记录公网端口和容器端口。
+- 默认容量是 `30000-30015`（16 个端口）。Docker 默认每个发布端口起一个 `docker-proxy`，约 3 MB PSS；1001 个端口约 2.8 GB。不要为了省事开大段，扩容与迁移步骤见[节点端口容量](node-ports.md)。
 - frps 的 `allowPorts` 和 agent 的 plugin 都校验允许端口集合；客户端 UI 只能选择控制端分配的结果。
 - 游戏端口范围与控制端口、管理端口及该命名空间的临时源端口范围分离。范围有重叠时，在命名空间配置 `ip_local_reserved_ports` 并验证自动分配结果。 [Linux 端口分配文档](https://docs.kernel.org/networking/ip-sysctl.html)
 - 当前客户端随机端口是 `10000-65534`，必须改为按节点返回的端口范围选择，否则大部分启动会失败。
@@ -308,7 +309,7 @@ GET  /api/v1/lobby/online
 节点使用 TLS TCP 长连接，协议为按行 JSON。每行一个消息，带 `type`、`seq`、`payload`。
 
 ```text
-hello           {protocol_version, node_id, secret, agent_version, frps_version, public_host}
+hello           {protocol_version, node_id, node_name, public_host, frp_public_port, agent_version, frps_version, deployed_ports}
 heartbeat       {seq, tunnel_count, load}
 tunnel_snapshot {seq, tunnels: [...]}
 tunnel_opened   {seq, tunnel: {...}}
@@ -321,6 +322,7 @@ ack             {command_id, ok, error}
 约束：
 
 - 节点只主动出站，不监听公网控制端口。
+- Agent 首次启动自动生成 `node-<16位hex>` 并保存在数据卷；控制端收到未知 ID 时自动建档，不再校验节点 secret。旧 Agent 仍可发送 `secret`，控制端忽略。旧部署的 `NODE_ID` 环境变量继续兼容：Agent 会把它写入 `/data/node-id`，避免升级后变成新节点。
 - 心跳 10 秒；30 秒无心跳判离线。
 - 重连退避 1s → 60s，带 jitter。
 - 重连后发送全量 `tunnel_snapshot`。
@@ -354,7 +356,7 @@ GET      /api/admin/online
 GET      /api/admin/audit
 ```
 
-管理端已实现基于 Cookie 的服务端会话。超级管理员、运维和只读角色可读取管理页面。创建、编辑和删除节点限超级管理员。创建响应只返回一次节点密钥，节点列表省略密钥及其摘要。[账号配置](../control/README.md#管理台前端)
+管理端已实现基于 Cookie 的服务端会话。超级管理员、运维和只读角色可读取管理页面。创建、编辑和删除节点限超级管理员。新 Agent 首次连接会自动建档，默认未发布；创建接口仍可用于预登记，但不再返回节点密钥。[账号配置](../control/README.md#管理台前端)
 
 ## 7. 隧道发现与身份
 
@@ -549,7 +551,7 @@ volumes:
 
 2026-11-25 起，Control Server 的 HTTPS 入口是 `https://ctl.mctools.mitahill.com`（A/AAAA 都指向 Phoenix）。宿主机系统 nginx 在 443 上终止 TLS，把 `/` 代理到 `127.0.0.1:18765`（Compose 中 control 容器发布的 8000 端口），并发送 `Host`、`X-Forwarded-For` 与 `X-Forwarded-Proto`。证书由 certbot 管理。旧 trial nginx 的 `mitahill.com:18443` 入口已经停用。
 
-香港 dev Agent 使用 `CONTROL_URL=https://ctl.mctools.mitahill.com:443`，并将 `CONTROL_CA_FILE` 设为空，使用系统信任库验证 nginx 的服务端证书。它在 `/api/v1/node/connect` 通过 HTTPS 升级为 WebSocket，沿用节点 secret 和原有消息格式。Control Server 设置 `CONTROL_NODE_HUB_HTTPS=1`，并在 nginx 的该路径转发 WebSocket 升级头。Phoenix 当前 Compose 部署通过 `control/node-https.yaml` 覆盖镜像和该环境变量，重建控制端时需把此文件加入现有的 `-f` 参数。
+香港 dev Agent 使用 `CONTROL_URL=https://ctl.mctools.mitahill.com:443`，并将 `CONTROL_CA_FILE` 设为空，使用系统信任库验证 nginx 的服务端证书。它在 `/api/v1/node/connect` 通过 HTTPS 升级为 WebSocket，沿用原有消息格式，但不再发送节点 secret。Control Server 设置 `CONTROL_NODE_HUB_HTTPS=1`，并在 nginx 的该路径转发 WebSocket 升级头。Phoenix 当前 Compose 部署通过 `control/node-https.yaml` 覆盖镜像和该环境变量，重建控制端时需把此文件加入现有的 `-f` 参数。
 
 ```nginx
 location = /api/v1/node/connect {
@@ -563,11 +565,11 @@ location = /api/v1/node/connect {
 }
 ```
 
-旧 Agent 仍可连接 `tls://us-6.mitahill.com:19443`，并使用其原有 CA 配置。HTTPS 节点入口使用服务端证书和节点 secret。启用节点客户端 CA 的 Hub 继续使用独立的 mTLS 监听。
+旧 Agent 仍可连接 `tls://us-6.mitahill.com:19443`，并使用其原有 CA 配置。HTTPS 节点入口只使用服务端证书，节点身份不再校验。启用节点客户端 CA 的 Hub 继续使用独立的 mTLS 监听；该模式要求证书 URI SAN 与 `node_id` 一致，因此不兼容自动生成的节点 ID。
 
 #### 节点 mTLS 与证书轮换
 
-在 Hub 的 TLS 挂载目录添加节点客户端 CA，设置 `CONTROL_NODE_HUB_CLIENT_CA=/run/control-tls/node-clients-ca.pem`。启用后 Hub 要求客户端证书链通过校验，证书须使用 `clientAuth`，并包含唯一的 URI SAN `urn:minecrafttools:node:<node_id>`。Hub 仍核对原有的节点 secret。滚动接入时先为各 Agent 配置凭据，再启用 Hub 的客户端证书校验。
+在 Hub 的 TLS 挂载目录添加节点客户端 CA，设置 `CONTROL_NODE_HUB_CLIENT_CA=/run/control-tls/node-clients-ca.pem`。启用后 Hub 要求客户端证书链通过校验，证书须使用 `clientAuth`，并包含唯一的 URI SAN `urn:minecrafttools:node:<node_id>`。该模式仍校验证书身份，但不再核对节点 secret；自动生成的 `node-<hex>` ID 无法预先签发证书，因此启用客户端 CA 时应关闭自动建档、继续预登记节点。滚动接入时先为各 Agent 配置凭据，再启用 Hub 的客户端证书校验。
 
 Agent 使用 `CONTROL_CLIENT_CERT_FILE` 与 `CONTROL_CLIENT_KEY_FILE` 读取只读挂载中的证书和私钥，两个变量成对配置。轮换时并行签发同一节点身份的新证书，先部署新证书和私钥，再让 Agent 重连，确认快照、心跳和命令 ACK。Agent 在新 TLS 握手时会重读证书和私钥。轮换成功后撤销旧证书，用 `CONTROL_NODE_HUB_CLIENT_CRL=/run/control-tls/node-clients.crl.pem` 配置签名 CRL，并重启隔离 Control Server 以加载新的信任配置。轮换 CA 时先部署可验证新旧链的 CA 及对应的 CRL，再逐个迁移节点。
 
@@ -575,7 +577,12 @@ Agent 使用 `CONTROL_CLIENT_CERT_FILE` 与 `CONTROL_CLIENT_KEY_FILE` 读取只�
 
 ### 10.2 节点端 Compose
 
-实际部署使用 [节点 Compose](../node/compose.yaml)。`firewall-helper`、`firewall-health` 和 `agent` 由 `node/` 镜像提供。以下示例展示网络拓扑。本地网络验证使用了等价的 Docker CLI 网络参数，见[封锁验证](#122-真实-frp-测试)。
+实际部署使用 [节点 Compose](../node/compose.yaml)。生产环境的新节点可直接使用
+[Agent 部署脚本](../deploy/agent/README.md)：它生成 Compose、`frps.toml` 和多段端口
+映射，并等待 Agent 连上控制端。Agent 首次启动自动生成节点 ID，控制端收到未知 ID
+时自动建档；管理台只需要确认公网地址、允许端口和发布通道。`firewall-helper`、
+`firewall-health` 和 `agent` 由 `node/` 镜像提供。以下示例展示网络拓扑。本地网络验证
+使用了等价的 Docker CLI 网络参数，见[封锁验证](#122-真实-frp-测试)。
 
 ```yaml
 services:
@@ -585,7 +592,7 @@ services:
     networks: [node]
     ports:
       - "7000:7000"
-      - "30000-30100:30000-30100"
+      - "30000-30015:30000-30015"
     cap_drop: [ALL]
     restart: unless-stopped
 
@@ -625,7 +632,8 @@ services:
     environment:
       CONTROL_URL: https://ctl.mctools.mitahill.com:443
       CONTROL_CA_FILE: ""
-      NODE_ID: node-xxx
+      NODE_NAME: hk-dev
+      FRP_PUBLIC_CONTROL_PORT: "7000"
       FRPS_ADMIN_URL: http://node-net:7400
       PLUGIN_LISTEN: 0.0.0.0:9000
       FIREWALL_SOCKET: /run/minecrafttools/firewall.sock
@@ -668,10 +676,11 @@ frps 配置示例适用 FRP v0.72.0。 [上游 frps 配置](https://github.com/f
 ```toml
 bindPort = 7000
 proxyBindAddr = "0.0.0.0"
-auth.token = "<node-token>"
+# 新节点不再配置 auth.token；旧节点保留时客户端仍会收到该令牌。
+# auth.token = "<node-token>"
 
 allowPorts = [
-  { start = 30000, end = 30100 }
+  { start = 30000, end = 30015 }
 ]
 
 webServer.addr = "0.0.0.0"
@@ -687,6 +696,7 @@ ops = ["Login", "NewProxy", "CloseProxy", "NewUserConn"]
 ```
 
 - `node-net` 是共享命名空间在 bridge 上的 DNS 名。agent 通过 `node-net:7400` 读管理状态，frps 通过 `agent:9000` 调插件，双方端口都留在 bridge 内。
+- 容器名固定为 `mitahill-mctools-agent-net`、`mitahill-mctools-agent-firewall`、`mitahill-mctools-agent`、`mitahill-mctools-agent-frps`，与 Compose 项目名无关；由此同一宿主机只能运行一个节点项目。网络与数据卷仍按项目名命名（`<项目名>_node`、`<项目名>_node-data`），迁移项目名时要连同卷一起迁移。
 - `frps.toml` 含 FRP 凭据。在宿主机将文件设置为 `root:10001`、权限 `0640`，以只读方式挂载给使用 UID/GID `10001` 的 frps。
 - `allowPorts`、agent 的白名单、helper 的操作范围和客户端节点配置使用同一游戏端口范围。IPv6 节点配置 `proxyBindAddr = "::"`，并独立验证 Docker bridge 与公网 IPv6 发布。
 - 原型的 frps 接受普通 TCP。Agent 到控制端 Hub 使用独立的 TLS 连接。

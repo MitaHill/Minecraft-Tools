@@ -4,8 +4,6 @@ import logging
 import ssl
 from contextlib import suppress
 from dataclasses import dataclass
-from hashlib import sha256
-from hmac import compare_digest
 from time import time
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
@@ -27,7 +25,7 @@ from .moderation import (
     lock_settings,
     node_policy,
 )
-from .node_ports import load_ranges
+from .node_ports import load_ranges, replace_ranges
 from .registry import blocks, nodes, tunnel_claims, tunnels
 from .tunnel_commands import (
     CommandConflict,
@@ -49,6 +47,18 @@ class ProtocolError(ValueError):
     pass
 
 
+def public_host(value: str | None) -> str:
+    """Return a normalized host or an empty string when it is unusable."""
+    if not value:
+        return ""
+    host = value.strip().strip("[]").rstrip(".").lower()
+    if not host or len(host) > 253:
+        return ""
+    if any(char.isspace() or char in "/\\?#@" for char in host):
+        return ""
+    return host
+
+
 class Message(BaseModel):
     type: str
     seq: int = Field(ge=1, le=2**63 - 1, strict=True)
@@ -57,11 +67,14 @@ class Message(BaseModel):
 
 class Hello(BaseModel):
     protocol_version: Literal[1]
-    node_id: str = Field(min_length=1, max_length=63)
-    secret: str = Field(min_length=1, max_length=128)
+    node_id: str = Field(min_length=1, max_length=63, pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    # 旧 Agent 仍会发送 secret；控制端不再校验，字段仅用于兼容。
+    secret: str | None = Field(default=None, max_length=128)
+    node_name: str | None = Field(default=None, max_length=80)
     agent_version: str = Field(min_length=1, max_length=80)
     frps_version: str = Field(min_length=1, max_length=80)
     public_host: str | None = Field(default=None, max_length=253)
+    frp_public_port: int | None = Field(default=None, ge=1, le=65535, strict=True)
     deployed_ports: list[tuple[int, int]] | None = Field(default=None, max_length=128)
     blacklist_cidr: bool = Field(default=False, strict=True)
 
@@ -144,6 +157,10 @@ class TLSNodeConnection:
             if identities != [expected]:
                 raise ProtocolError("client certificate identity does not match node")
 
+    def peer_host(self) -> str:
+        peer = self.writer.get_extra_info("peername")
+        return peer[0] if peer else ""
+
 
 @dataclass
 class WebSocketNodeConnection:
@@ -164,6 +181,10 @@ class WebSocketNodeConnection:
     async def close(self):
         with suppress(RuntimeError, WebSocketDisconnect):
             await self.socket.close()
+
+    def peer_host(self) -> str:
+        client = self.socket.client
+        return client.host if client else ""
 
 
 class NodeHub:
@@ -244,15 +265,33 @@ class NodeHub:
         async with asyncio.timeout(5):
             await connection.send(json.dumps(reply, separators=(",", ":")).encode() + b"\n")
 
-    def authenticate(self, hello: Hello):
-        query = select(nodes).where(nodes.c.id == hello.node_id)
-        with self.database.connect() as connection:
+    def resolve_node(self, hello: Hello, peer_host: str):
+        """Look up the node, creating it on first contact.
+
+        Node identity is no longer authenticated: an unknown node_id is
+        registered automatically and an existing node is accepted as-is.
+        """
+        with self.database.begin() as connection:
+            query = select(nodes).where(nodes.c.id == hello.node_id)
             node = connection.execute(query).mappings().one_or_none()
-        if node is None or not compare_digest(
-            node["token_hash"], sha256(hello.secret.encode()).hexdigest()
-        ):
-            raise ProtocolError("authentication failed")
-        return node
+            if node is not None:
+                return dict(node)
+            name = (hello.node_name or "").strip()[:80] or hello.node_id
+            host = public_host(hello.public_host) or public_host(peer_host) or "localhost"
+            statement = insert(nodes).values(
+                id=hello.node_id,
+                name=name,
+                public_host=host,
+                server_port=hello.frp_public_port or 7000,
+                client_channel="hidden",
+                status="offline",
+                token_hash="",
+            ).on_conflict_do_nothing(index_elements=[nodes.c.id])
+            inserted = connection.execute(statement).rowcount == 1
+            node = connection.execute(query).mappings().one()
+            if hello.deployed_ports and (inserted or not load_ranges(connection, hello.node_id)):
+                replace_ranges(connection, hello.node_id, hello.deployed_ports)
+            return dict(node)
 
     def set_online(self, hello: Hello):
         with self.database.begin() as connection:
@@ -493,6 +532,7 @@ class NodeHub:
         task = asyncio.current_task()
         self.tasks.add(task)
         node_id = None
+        peer_host = connection.peer_host()
         clock = asyncio.get_running_loop().time
         try:
             first = await self.read_message(connection, clock() + HELLO_TIMEOUT)
@@ -505,7 +545,7 @@ class NodeHub:
                 not 1024 <= start <= end <= 65535 for start, end in hello.deployed_ports
             ):
                 raise ProtocolError("invalid deployed port ranges")
-            await asyncio.to_thread(self.authenticate, hello)
+            await asyncio.to_thread(self.resolve_node, hello, peer_host)
             node_id = hello.node_id
             lock = self.locks.setdefault(node_id, asyncio.Lock())
             async with lock:
@@ -517,7 +557,7 @@ class NodeHub:
             policy = (await asyncio.to_thread(node_policy, self.database, node_id)
                       if hello.deployed_ports is not None else None)
             await self.acknowledge(connection, first, {"policy": policy} if policy else None)
-            logger.info("Node authenticated node_id=%s", node_id)
+            logger.info("Node connected node_id=%s", node_id)
 
             last_seq = first.seq
             last_heartbeat = clock()

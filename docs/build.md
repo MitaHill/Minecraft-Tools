@@ -86,11 +86,37 @@ kindmitaishere/minecrafttools-frp-agent:2026-11-25-1
 
 每个镜像都包含 `linux/amd64` 与 `linux/arm64`，推送后用 `docker buildx imagetools inspect` 校验两个平台。`main` 推送和 PR 只在 `control/**`、`node/**` 或工作流自身变更时做单平台构建，不推送，用来提前发现 Dockerfile 破损；标签推送不受路径过滤影响，照常发布双架构镜像。正式版 Git 标签 `yyyy-mm-dd-n` 直接用作镜像标签。dev 的 Git 标签 `dev-yyyy-mm-dd-n` 去掉 `dev-` 后用作镜像标签。两个通道共享当天的发布序号，避免不同构建占用同一个镜像标签。
 
+本地构建 Agent 镜像时必须传入与镜像标签一致的 `VERSION`，否则管理台会显示
+`0.0.0-local`：
+
+```sh
+docker build --build-arg VERSION=2026-11-27-1 \
+  -t kindmitaishere/minecrafttools-frp-agent:2026-11-27-1 node
+docker run --rm --entrypoint /usr/local/bin/frp-agent \
+  kindmitaishere/minecrafttools-frp-agent:2026-11-27-1 version
+```
+
+`node/compose.yaml` 的本地构建使用 `AGENT_VERSION` 变量传入同一个值。
+
 ### 部署
 
 镜像发布不等于上线。Control Server 的部署是手工 SOP，工作流不连接 Phoenix：compose 目录固定在
 `/opt/minecraft-tools/control-server/`，用 `deploy.sh <tag>` 切换镜像，健康检查失败自动退回上一版。
 步骤、验证和回滚见 [Phoenix 部署 SOP](../deploy/control-server/README.md)。
+
+Agent 的新节点使用 [Agent 部署脚本](../deploy/agent/README.md)：
+
+```sh
+sudo deploy/agent/deploy.sh --yes --name hk-dev \
+  --ports 33001-33016 --dir /opt/minecraft-tools/agent --tag 2026-11-26-11
+```
+
+脚本生成 Compose、`frps.toml`、多段端口映射和 `secrets/`，写入后执行
+`docker compose up -d` 并等待 Agent 连上控制端。Agent 首次启动自动生成节点 ID，
+控制端自动建档；部署顺序必须是先升级 Control Server，再部署新 Agent。旧 Agent
+仍会发送节点 secret，新版控制端忽略该字段。旧节点 compose 里的 `NODE_ID` 可以
+保留，Agent 会把它持久化到数据卷；新节点不再需要该变量。新节点不配置 frpc 登录
+令牌；旧节点继续兼容，全部重建后再移除相关字段。
 
 ### dev-2026-11-26-1 发布记录
 

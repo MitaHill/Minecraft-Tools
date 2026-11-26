@@ -98,7 +98,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(self.sign_in("owner").status_code, 200)
         response = self.http.post("/api/admin/nodes", json=node)
         self.assertEqual(response.status_code, 201)
-        self.assertGreater(len(response.json()["secret"]), 32)
+        self.assertEqual(response.json(), {"id": "test-node"})
         self.assertEqual(self.http.post("/api/admin/nodes", json=node).status_code, 409)
         (node_data,) = self.http.get("/api/admin/nodes").json()["nodes"]
         self.assertEqual(node_data["id"], "test-node")
@@ -175,7 +175,7 @@ class AdminTests(unittest.TestCase):
             "allowed_ports": "30001-30002", "client_channel": "dev",
         }
         self.assertEqual(self.http.post("/api/admin/nodes", json=payload).status_code, 422)
-        payload.update(server_port=7000, frp_token="fixture-frpc-token")
+        payload.update(server_port=7000)
         self.assertEqual(self.http.post("/api/admin/nodes", json=payload).status_code, 201)
         published = self.http.get(url).json()
         self.assertEqual(published["nodes"], [{"id": "test-node", "name": "Test Node"}])
@@ -183,8 +183,8 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(self.http.get(url).json(), published)
         self.assertEqual(self.http.get("/api/v1/node-catalog").json()["nodes"], [])
         (admin_node,) = self.http.get("/api/admin/nodes").json()["nodes"]
-        self.assertTrue(admin_node["frp_token_configured"])
         self.assertNotIn("frp_token", admin_node)
+        self.assertNotIn("frp_token_configured", admin_node)
         payload = {key: payload[key] for key in ("public_host", "allowed_ports")}
         edit = "/api/admin/nodes/test-node"
         self.assertEqual(self.http.patch(edit, json={**payload, "name": "Renamed"}).status_code, 200)
@@ -429,7 +429,7 @@ class AdminTests(unittest.TestCase):
             ("30001,,30002", "请输入允许端口"),
             ("30001-30002-30003", "端口格式应为 30000-30010,31000"),
             ("30001,65536", "端口需在 1024–65535 之间"),
-            ("30009", "映射范围须在节点已部署的端口范围内"),
+            ("30009", "映射范围须在节点已部署的端口范围内（当前 30001-30008）"),
         ):
             response = self.http.patch(url, json={**base, "allowed_ports": spec})
             self.assertEqual(response.status_code, 422, spec)

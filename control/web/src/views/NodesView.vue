@@ -10,7 +10,6 @@ type Node = {
   server_addr: string | null
   server_port: number | null
   client_channel: 'hidden' | 'dev' | 'stable' | 'both'
-  frp_token_configured: boolean
   status: string
   agent_version: string | null
   allowed_ports: string
@@ -22,8 +21,6 @@ const { data, error, loading, refresh, request } = useAdminList<{ nodes: Node[] 
 const canEdit = computed(() => account.value?.role === 'superadmin')
 const dialog = ref<HTMLDialogElement>()
 const editing = ref<Node>()
-const frpToken = ref('')
-const clearFrpToken = ref(false)
 const saveError = ref('')
 const message = ref('')
 const busy = ref(false)
@@ -38,8 +35,6 @@ const channels = { hidden: '未发布', dev: 'dev', stable: 'stable', both: 'dev
 
 async function edit(row: Node) {
   editing.value = { ...row }
-  frpToken.value = ''
-  clearFrpToken.value = false
   saveError.value = ''
   await nextTick()
   dialog.value?.showModal()
@@ -53,11 +48,9 @@ async function save() {
   message.value = ''
   try {
     const { name, public_host, allowed_ports, server_addr, server_port, client_channel } = row
-    const tokenUpdate = clearFrpToken.value ? { frp_token: null }
-      : frpToken.value ? { frp_token: frpToken.value } : {}
     const result = await request<{ pending: boolean }>(`/nodes/${encodeURIComponent(row.id)}`, 'PATCH', {
       name, public_host, allowed_ports, client_channel,
-      server_addr: server_addr?.trim() || null, server_port: server_port || null, ...tokenUpdate,
+      server_addr: server_addr?.trim() || null, server_port: server_port || null,
     })
     message.value = result.pending ? '已提交端口范围，等待节点确认。' : '节点信息已保存。'
     dialog.value?.close()
@@ -98,6 +91,7 @@ async function remove() {
 
 <template>
   <header class="page-heading"><h1>节点</h1></header>
+  <p class="cell-note">Agent 首次连接会自动出现在列表中，默认未发布；确认公网地址、允许端口和发布通道后客户端才能使用。</p>
   <p v-if="error" class="action-error" role="alert">{{ error }}</p>
   <p v-if="message" role="status">{{ message }}</p>
   <section v-if="!data?.nodes.length" class="empty-panel">{{ loading && !data ? '正在读取节点…' : '暂无节点。' }}</section>
@@ -136,13 +130,14 @@ async function remove() {
         <label>frpc 连接主机<input v-model="editing.server_addr" maxlength="253" placeholder="默认使用公网主机" :disabled="busy"></label>
         <label>frpc 连接端口<input v-model.number="editing.server_port" type="number" min="1" max="65535" :required="editing.client_channel !== 'hidden'" :disabled="busy"></label>
       </div>
-      <label>frpc 登录令牌<input v-model="frpToken" type="password" maxlength="1024" autocomplete="new-password" :placeholder="editing.frp_token_configured ? '留空保留现有令牌' : '可选'" :disabled="busy || clearFrpToken"></label>
-      <label v-if="editing.frp_token_configured" class="checkbox-field"><input v-model="clearFrpToken" type="checkbox" :disabled="busy">清除 frpc 登录令牌</label>
       <label>允许端口
         <input v-model="editing.allowed_ports" required maxlength="1024" placeholder="30000-30010,31000"
           :disabled="busy || editing.status !== 'online' || !editing.deployed_ports">
       </label>
-      <p class="cell-note">逗号分隔，段内用横杠；端口须落在部署范围内。</p>
+      <p class="cell-note">
+        逗号分隔，段内用横杠；须落在节点部署范围内<template v-if="editing.deployed_ports">（{{ editing.deployed_ports.map(([start, end]) => range(start, end)).join('、') }}）</template>。
+      </p>
+      <p class="cell-note">扩大部署范围需调整节点 NODE_PORT_START/END 与 frps allowPorts，重启 Agent 后生效。</p>
       <p v-if="editing.status !== 'online'">节点上线后可编辑公网地址和允许端口。</p>
       <p v-else-if="!editing.deployed_ports">Agent 同步部署范围后可编辑允许端口。</p>
       <p v-if="saveError" class="action-error" role="alert">{{ saveError }}</p>

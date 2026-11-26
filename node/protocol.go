@@ -27,7 +27,7 @@ type ControlConnection struct {
 	hello    map[string]any
 }
 
-func newControlConnection(address, caFile, certFile, keyFile, nodeID, secret, frpsVersion string) (*ControlConnection, error) {
+func newControlConnection(address, caFile, certFile, keyFile, nodeID, frpsVersion string) (*ControlConnection, error) {
 	parsed, err := url.Parse(address)
 	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.ForceQuery ||
 		parsed.RawQuery != "" || parsed.Fragment != "" ||
@@ -36,8 +36,8 @@ func newControlConnection(address, caFile, certFile, keyFile, nodeID, secret, fr
 		(parsed.Scheme != "tls" && parsed.Scheme != "https") {
 		return nil, errors.New("CONTROL_URL must be https://hostname[:port] or tls://hostname:port")
 	}
-	if nodeID == "" || secret == "" {
-		return nil, errors.New("NODE_ID and a node secret are required")
+	if nodeID == "" {
+		return nil, errors.New("node id is required")
 	}
 	config := &tls.Config{ServerName: parsed.Hostname(), MinVersion: tls.VersionTLS12}
 	if caFile != "" {
@@ -73,7 +73,7 @@ func newControlConnection(address, caFile, certFile, keyFile, nodeID, secret, fr
 		endpoint = parsed.String()
 	}
 	return &ControlConnection{address: parsed.Host, endpoint: endpoint, tls: config, hello: map[string]any{
-		"protocol_version": 1, "node_id": nodeID, "secret": secret,
+		"protocol_version": 1, "node_id": nodeID,
 		"agent_version": version, "frps_version": frpsVersion, "blacklist_cidr": true,
 	}}, nil
 }

@@ -62,6 +62,9 @@ ssh phoenix 'cd /opt/minecraft-tools/control-server && ./deploy.sh <tag> --no-ro
 
 ## 滚动更新 Agent
 
+新节点优先使用 [Agent 部署脚本](../agent/README.md) 完成首次安装和端口变更。已有节点
+继续沿用下面的镜像覆盖流程。
+
 发布包含多段允许端口策略的版本时，先按本节升级所有节点 Agent，再部署 Control Server；新 Agent 兼容旧控制端下发的单段策略。
 
 节点更新按以下步骤执行。对每个节点记录并备份当前镜像覆盖文件，拉取同一版本的 `kindmitaishere/minecrafttools-frp-agent`，将覆盖文件里的 `agent` 与 `firewall` 指向该标签。沿用该节点的 Compose 项目名、环境和覆盖文件。以香港 dev 为例：

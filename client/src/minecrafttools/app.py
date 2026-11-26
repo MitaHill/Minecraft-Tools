@@ -34,7 +34,7 @@ from minecrafttools.lobby import LobbyTab, room_payload
 from minecrafttools.node_catalog import NodeCatalog, version_tuple
 from minecrafttools.styles import STYLE
 
-ANNOUNCEMENTS = QUrl("https://b.clash.ink/archives/mi-ta-shan-lian-ji-gong-ju")
+ANNOUNCEMENTS = QUrl("https://www.mitahill.com/mctools.html")
 LEGACY_BLOCK_REASONS = {"no_minecraft_status": "未检测到 Minecraft Java 响应。"}
 
 

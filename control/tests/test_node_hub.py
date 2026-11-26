@@ -14,6 +14,7 @@ from support import seed_node
 
 from app.database import audit_logs, open_database
 from app.node_hub import NodeHub, server_tls
+from app.node_ports import node_port_ranges
 from app.registry import nodes, tunnels
 from app.tunnel_commands import acknowledge_command, commands, enqueue_command
 
@@ -194,14 +195,17 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
         )
         await writer.drain()
 
-    def hello(self, secret):
-        return {
+    def hello(self, secret=None, node_id="test-node", **extra):
+        payload = {
             "protocol_version": 1,
-            "node_id": "test-node",
-            "secret": secret,
+            "node_id": node_id,
             "agent_version": "test",
             "frps_version": "0.72.0",
         }
+        if secret is not None:
+            payload["secret"] = secret
+        payload.update(extra)
+        return payload
 
     async def test_disconnect_cancels_a_connected_session(self):
         async def idle():
@@ -251,15 +255,11 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
             self.statuses(), ("offline", {"alpha": "closed", "beta": "offline"})
         )
 
-    async def test_refuses_wrong_secret_and_port_outside_registry(self):
+    async def test_accepts_any_secret_and_port_outside_registry(self):
         reader, writer = await self.connect()
         await self.send(writer, "hello", 1, self.hello("incorrect"))
-        self.assertEqual(await reader.readline(), b"")
-        self.assertEqual(self.statuses(), ("offline", {}))
-
-        reader, writer = await self.connect()
-        await self.send(writer, "hello", 1, self.hello(self.secret))
         self.assertEqual(json.loads(await reader.readline())["type"], "hello_ack")
+        self.assertEqual(self.statuses()[0], "online")
         await self.send(
             writer,
             "tunnel_snapshot",
@@ -276,6 +276,37 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await reader.readline(), b"")
         self.assertEqual(self.statuses(), ("offline", {}))
+
+    async def test_registers_unknown_node_without_secret(self):
+        reader, writer = await self.connect()
+        await self.send(
+            writer,
+            "hello",
+            1,
+            self.hello(
+                node_id="auto-node",
+                node_name="自动节点",
+                public_host="auto.example",
+                frp_public_port=37000,
+                deployed_ports=[[31000, 31002], [31004, 31005]],
+            ),
+        )
+        self.assertEqual(json.loads(await reader.readline())["type"], "hello_ack")
+        with self.db.connect() as connection:
+            node = connection.execute(
+                select(nodes).where(nodes.c.id == "auto-node")
+            ).mappings().one()
+            ranges = connection.execute(
+                select(node_port_ranges.c.start_port, node_port_ranges.c.end_port)
+                .where(node_port_ranges.c.node_id == "auto-node")
+                .order_by(node_port_ranges.c.start_port)
+            ).all()
+        self.assertEqual(node["name"], "自动节点")
+        self.assertEqual(node["public_host"], "auto.example")
+        self.assertEqual(node["server_port"], 37000)
+        self.assertEqual(node["client_channel"], "hidden")
+        self.assertEqual(node["status"], "online")
+        self.assertEqual([tuple(row) for row in ranges], [(31000, 31002), (31004, 31005)])
 
     async def test_retries_lost_command_ack_and_accepts_duplicate_ack(self):
         reader, writer = await self.connect()

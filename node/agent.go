@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,11 +14,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const maxMessageSize = 1024 * 1024
@@ -336,6 +339,77 @@ func configuredSecret(name string) (string, error) {
 	return os.Getenv(name), nil
 }
 
+var nodeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// loadOrCreateNodeID gives every agent a stable identity without asking the
+// operator for one. NODE_ID stays supported as a legacy override so upgrading
+// an already registered node does not create a second node record.
+func loadOrCreateNodeID(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, "node-id")
+	if configured := strings.TrimSpace(os.Getenv("NODE_ID")); configured != "" {
+		if !nodeIDPattern.MatchString(configured) {
+			return "", errors.New("invalid NODE_ID")
+		}
+		existing, err := os.ReadFile(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if err != nil || strings.TrimSpace(string(existing)) != configured {
+			if err := writeNodeID(path, configured); err != nil {
+				return "", err
+			}
+		}
+		return configured, nil
+	}
+	body, err := os.ReadFile(path)
+	if err == nil {
+		id := strings.TrimSpace(string(body))
+		if !nodeIDPattern.MatchString(id) {
+			return "", fmt.Errorf("invalid node id in %s", path)
+		}
+		return id, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	id := "node-" + hex.EncodeToString(buffer)
+	if err := writeNodeID(path, id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func writeNodeID(path, id string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".node-id-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if err := file.Chmod(0600); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err := fmt.Fprintln(file, id); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
+}
+
 func portRange() (int, int, error) {
 	start, err := strconv.Atoi(envOr("NODE_PORT_START", "30000"))
 	if err != nil {
@@ -356,20 +430,38 @@ func runAgent(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	agent, err := openAgent(filepath.Join(envOr("NODE_DATA_DIR", "/data"), "proxies.json"), start, end)
+	dataDir := envOr("NODE_DATA_DIR", "/data")
+	nodeID, err := loadOrCreateNodeID(dataDir)
 	if err != nil {
 		return err
 	}
-	secret, err := configuredSecret("NODE_SECRET")
+	agent, err := openAgent(filepath.Join(dataDir, "proxies.json"), start, end)
 	if err != nil {
 		return err
 	}
 	connection, err := newControlConnection(os.Getenv("CONTROL_URL"), os.Getenv("CONTROL_CA_FILE"),
 		os.Getenv("CONTROL_CLIENT_CERT_FILE"), os.Getenv("CONTROL_CLIENT_KEY_FILE"),
-		os.Getenv("NODE_ID"), secret, envOr("FRPS_VERSION", "0.72.0"))
+		nodeID, envOr("FRPS_VERSION", "0.72.0"))
 	if err != nil {
 		return err
 	}
+	if name := strings.TrimSpace(os.Getenv("NODE_NAME")); name != "" {
+		if utf8.RuneCountInString(name) > 80 {
+			return errors.New("NODE_NAME is longer than 80 characters")
+		}
+		connection.hello["node_name"] = name
+	}
+	if host := strings.TrimSpace(os.Getenv("NODE_PUBLIC_HOST")); host != "" {
+		if len(host) > 253 {
+			return errors.New("NODE_PUBLIC_HOST is longer than 253 characters")
+		}
+		connection.hello["public_host"] = host
+	}
+	publicPort, err := strconv.Atoi(envOr("FRP_PUBLIC_CONTROL_PORT", "7000"))
+	if err != nil || publicPort < 1 || publicPort > 65535 {
+		return errors.New("FRP_PUBLIC_CONTROL_PORT must be between 1 and 65535")
+	}
+	connection.hello["frp_public_port"] = publicPort
 	dashboardPassword, err := configuredSecret("FRPS_ADMIN_PASSWORD")
 	if err != nil {
 		return err
@@ -434,6 +526,8 @@ func main() {
 		_, err = firewallCall(ctx, envOr("FIREWALL_SOCKET", firewallSocket), FirewallRequest{Action: "ready"})
 	case "frps":
 		err = runFrps(ctx, os.Args[2:])
+	case "version":
+		fmt.Println(version)
 	default:
 		log.Fatal("unknown command")
 	}
