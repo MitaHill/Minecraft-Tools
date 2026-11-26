@@ -438,6 +438,7 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
     ranges = parse_spec(payload.allowed_ports)
     client_config = payload.client_config()
     closing = []
+    reopening = []
     with request.app.state.database.begin() as connection:
         lock_settings(connection)
         node = connection.execute(select(nodes).where(nodes.c.id == node_id)).mappings().one_or_none()
@@ -486,6 +487,14 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
                     tunnels.c.status.in_(("pending", "active")),
                 )
             ).mappings())
+        elif channel != "hidden" and node["client_channel"] == "hidden":
+            reopening = list(connection.execute(
+                select(blocks.c.tunnel_id).where(
+                    blocks.c.node_id == node_id,
+                    blocks.c.active.is_(True),
+                    blocks.c.source == "node-hidden",
+                )
+            ).scalars())
         if channel != node["client_channel"] or (channel != "hidden" and name != node["name"]):
             touch_node_catalog(connection)
         record_admin_action(connection, account.username, "node.edit", node_id)
@@ -496,9 +505,14 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
                 tunnel["id"],
                 "block",
                 "节点已下架，关闭隧道",
-                f"admin:{account.username}",
+                "node-hidden",
                 expected_run_id=tunnel["run_id"],
                 expected_port=tunnel["remote_port"],
+            )
+    for tunnel_id in reopening:
+        with suppress(CommandConflict):
+            enqueue_command(
+                request.app.state.database, tunnel_id, "unblock", "", "node-hidden"
             )
     return {"pending": changing_range}
 

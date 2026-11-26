@@ -339,7 +339,8 @@ class NodeHub:
             )
         )
         now = time()
-        unauthorized = []
+        hidden = node.get("client_channel") == "hidden"
+        closing = []
         with self.database.begin() as connection:
             connection.execute(missing)
             for item in items:
@@ -429,14 +430,17 @@ class NodeHub:
                     where=tunnels.c.status.not_in(["block_pending", "blocked"]),
                 ).returning(tunnels.c.id, tunnels.c.status, tunnels.c.created_at)
                 row = connection.execute(statement).mappings().one_or_none()
-                if row is not None and install_id is None:
-                    unauthorized.append({
-                        "id": row["id"],
-                        "created_at": row["created_at"],
-                        "run_id": item.run_id,
-                        "port": item.remote_port,
-                        "client_ip": client_ip,
-                    })
+                if row is not None:
+                    claimed = install_id is not None
+                    if hidden or not claimed:
+                        closing.append({
+                            "id": row["id"],
+                            "created_at": row["created_at"],
+                            "run_id": item.run_id,
+                            "port": item.remote_port,
+                            "client_ip": client_ip,
+                            "claimed": claimed,
+                        })
                 connection.execute(
                     update(tunnels)
                     .where(
@@ -460,25 +464,26 @@ class NodeHub:
                         blocks.c.client_ip.is_(None),
                     ).values(client_ip=client_ip))
 
-        for target in unauthorized:
-            if (
-                node.get("client_channel") != "hidden"
-                and time() - target["created_at"] < UNCLAIMED_GRACE
-            ):
-                continue
+        for target in closing:
+            if target["claimed"]:
+                reason, source = "节点已下架，关闭隧道", "node-hidden"
+            else:
+                if not hidden and time() - target["created_at"] < UNCLAIMED_GRACE:
+                    continue
+                reason, source = UNCLAIMED_BLOCK_REASON, "unauthorized"
             try:
                 command = enqueue_command(
                     self.database,
                     target["id"],
                     "block",
-                    UNCLAIMED_BLOCK_REASON,
-                    "unauthorized",
+                    reason,
+                    source,
                     expected_run_id=target["run_id"],
                     expected_port=target["port"],
                 )
             except CommandConflict:
                 continue
-            if command is not None:
+            if command is not None and not target["claimed"]:
                 ban_unclaimed_flood(self.database, target["client_ip"], time())
 
     async def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):

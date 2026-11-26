@@ -144,6 +144,26 @@ class ClientTunnelTests(unittest.TestCase):
             self.assertEqual(row["status"], "pending")
             self.assertEqual(connection.execute(select(commands)).all(), [])
 
+    def test_claimed_proxy_on_hidden_node_is_closed_without_ban(self):
+        self.publish_node(client_channel="both")
+        created = self.reserve(self.owner)
+        self.assertEqual(created.status_code, 201)
+        claim = created.json()
+        self.hub.record_snapshot(self.node_row(client_channel="hidden"), [Proxy(
+            run_id="run-claimed", proxy_name=claim["proxy_name"],
+            remote_port=claim["remote_port"], claim_id=claim["id"],
+            claim_hash=digest(claim["proof"]), client_ip="8.8.8.8",
+        )])
+        with self.db.connect() as connection:
+            row = connection.execute(select(tunnels)).mappings().one()
+            self.assertIsNotNone(row["install_id"])
+            self.assertEqual(row["status"], "block_pending")
+            self.assertEqual(
+                connection.execute(select(blocks.c.source)).scalar_one(),
+                "node-hidden",
+            )
+            self.assertEqual(connection.execute(select(blacklist)).all(), [])
+
     def test_unclaimed_proxy_is_blocked_after_grace(self):
         node = self.node_row(client_channel="both")
         proxy = Proxy(

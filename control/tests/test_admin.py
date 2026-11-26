@@ -19,7 +19,7 @@ from app.node_hub import Hello, NodeHub, ProtocolError
 from app.node_ports import node_port_ranges
 from app.registry import blocks, installs, nodes, tunnel_claims, tunnels
 from app.scanner import scans
-from app.tunnel_commands import commands
+from app.tunnel_commands import acknowledge_command, commands, next_command
 
 
 class AdminTests(unittest.TestCase):
@@ -192,7 +192,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(hidden["nodes"], [])
         self.assertGreater(hidden["updated_at"], renamed["updated_at"])
 
-    def test_hiding_node_blocks_its_live_tunnels(self):
+    def test_hiding_node_blocks_and_republishing_unblocks_its_tunnels(self):
         self.register_policy_node("a")
         self.sign_in("owner")
         with app.state.database.begin() as connection:
@@ -218,6 +218,26 @@ class AdminTests(unittest.TestCase):
             )
             self.assertEqual(
                 connection.execute(select(commands.c.action)).scalar_one(), "block"
+            )
+            self.assertEqual(
+                connection.execute(select(blocks.c.source)).scalar_one(),
+                "node-hidden",
+            )
+            command_id = connection.execute(select(commands.c.id)).scalar_one()
+        self.assertEqual(
+            next_command(app.state.database, "a")["command_id"], command_id
+        )
+        acknowledge_command(app.state.database, "a", command_id, True, "")
+        publish = {**payload, "client_channel": "both"}
+        self.assertEqual(
+            self.http.patch("/api/admin/nodes/a", json=publish).status_code, 200
+        )
+        with app.state.database.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    select(commands.c.action).order_by(commands.c.id)
+                ).scalars().all(),
+                ["block", "unblock"],
             )
 
     def test_blacklisted_requests_get_a_reason_and_no_catalog(self):
