@@ -116,31 +116,8 @@ jobs:
         run: go test ./...
         working-directory: node
 
-  release-nodes:
-    needs: prepare
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-24.04
-    environment: ${{ needs.prepare.outputs.channel }}
-    steps:
-      - name: Record the published node catalog
-        env:
-          MINECRAFTTOOLS_NODES_TOML: ${{ vars.MINECRAFTTOOLS_NODES_TOML }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$MINECRAFTTOOLS_NODES_TOML" ]]; then
-            echo "::error::Set MINECRAFTTOOLS_NODES_TOML in the release channel environment."
-            exit 1
-          fi
-          printf '%s\n' "$MINECRAFTTOOLS_NODES_TOML" > "$RUNNER_TEMP/release-nodes.toml"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: release-nodes
-          path: ${{ runner.temp }}/release-nodes.toml
-          if-no-files-found: error
-
   build:
-    needs: [prepare, release-nodes]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.release-nodes.result == 'success' || needs.release-nodes.result == 'skipped') }}
+    needs: prepare
     runs-on: ${{ matrix.runner }}
     name: ${{ matrix.system }} / ${{ matrix.arch }}
     strategy:
@@ -206,23 +183,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: uv run --project client --no-sync python client/scripts/fetch_frpc.py --tag "$FRP_TAG" --os "$TARGET_OS" --arch "$TARGET_ARCH" --output client/build/frp
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: github.ref_type == 'tag'
-        with:
-          name: release-nodes
-          path: ${{ runner.temp }}/release-nodes
       - name: Package and smoke test
         shell: bash
-        env:
-          NODE_CATALOG_DIR: ${{ runner.temp }}/release-nodes
-        run: |
-          set -euo pipefail
-          build=(uv run --project client --no-sync python client/scripts/build.py --frpc "$FRPC" --version "$BUILD_VERSION")
-          # macOS runners still ship bash 3.2, where an empty array trips `set -u`.
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            build+=(--nodes-file "$NODE_CATALOG_DIR/release-nodes.toml")
-          fi
-          "${build[@]}"
+        run: uv run --project client --no-sync python client/scripts/build.py --frpc "$FRPC" --version "$BUILD_VERSION"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: minecrafttools-${{ matrix.system }}-${{ matrix.arch }}

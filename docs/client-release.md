@@ -18,7 +18,7 @@
 
 ## 主体程序和小型更新器
 
-- **主体程序**负责映射、`frpc` 和大厅，在本地从内置节点列表填充线路选择。
+- **主体程序**负责映射、`frpc` 和大厅，启动时从 Control Server 拉取线路清单。
 - **Launcher** 是发布包的正常启动入口，负责网络检查、更新、启动主体程序及启动失败诊断。使用独立的本机可执行文件，优先选标准库和必要的系统 API。用户机器无需额外安装 Python、Qt 等运行环境。
 
 ### 启动和强制更新
@@ -42,7 +42,7 @@
 | `dev` | 已确认 dev 无更高版本，stable 有更高版本 | 安装 stable，保留本机的 `dev` 选择 |
 | 任一通道 | 按规则检查完毕，没有更高版本 | 启动当前版本 |
 
-dev 查询失败时结束本次检查。只有确认 dev 无更高版本时才检查 stable。切到 stable 后，下次启动依旧先查 dev，等 dev 版本号高于已安装的 stable 才切回。节点清单取自实际安装的构建。
+dev 查询失败时结束本次检查。只有确认 dev 无更高版本时才检查 stable。切到 stable 后，下次启动依旧先查 dev，等 dev 版本号高于已安装的 stable 才切回。MainApp 用实际安装构建的通道请求线路。[节点清单与端口分配](node-catalog.md)
 
 ### 主体程序就绪与 30 秒超时
 
@@ -135,12 +135,6 @@ Phoenix 托管更新时，上传作业在构建和验证通过后传输发布文
 - **Windows amd64 和 arm64**。Actions 的两个原生作业通过 MSI 安装、启动及卸载，下载的 MSI 均与 Release 的 SHA-256 一致。本轮本地 Windows 11 ARM 虚拟机在 MSI 验收期间进入挂起，真实在线更新和交互验证仍待补测。
 - **macOS arm64 隔离回滚**。在测试签名源分别提供有效签名但损坏的压缩包，以及在 `READY` 前以 37 退出的完整候选。版本状态和旧应用包保留，失败候选和下载缓存被清理。候选退出后实际 CI 主体重新启动并报告 `READY`，测试服务收到诊断。
 
-### 在构建时写入节点数据
+### 节点发布
 
-1. 为 `dev` 和 `stable` 使用对应的 GitHub Actions Environment。将公开节点配置写入环境变量 `MINECRAFTTOOLS_NODES_TOML`。签名私钥继续只在发布签名作业中使用。[GitHub Actions Environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
-2. 标签构建先保存一份通道目录供六个目标共用。打包脚本校验 TOML，再生成供主体程序导入的 Python 模块，按输入顺序保存不可变的 `Node` 列表。受控节点需要 `node_id` 和与 frps `allowPorts` 一致的端口区间。缺少节点、字段错误或名称冲突会中止构建。日常 CI 使用样例线路。
-3. 客户端启动时从内置目录填充「映射」页的线路下拉框，按所选节点的端口范围生成 frpc 临时配置。通过发布对应通道的新版本下发线路更新。
-
-GitHub Actions 的 `dev` 环境已配置独立香港线路，frps 地址为 `hk-1.mitahill.com:27002`，游戏端口为 `33001–33002`。macOS arm64 本地包已验证内置线路、普通 TCP 映射、大厅发布和封禁联动。`stable` 环境待配置。
-
-写入公开发布包的值可被用户提取，包括节点 token。任何必须保密的凭据只保存在 CI 或服务端。macOS Keychain 如用于导入 CI 签名证书，属于签名步骤。
+在 Control Server 管理台为节点选择发布通道。MainApp 启动时读取清单，点击「启动映射」时由 Control Server 分配端口。[节点清单与端口分配](node-catalog.md)

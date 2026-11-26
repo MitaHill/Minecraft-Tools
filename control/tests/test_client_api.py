@@ -1,4 +1,5 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import time
@@ -11,7 +12,7 @@ from app.client_api import digest
 from app.java_probe import Status
 from app.main import app
 from app.node_hub import NodeHub, Proxy
-from app.registry import installs, nodes, tunnel_claims, tunnels
+from app.registry import blocks, installs, nodes, tunnel_claims, tunnels
 from app.scanner import ScanPolicy, record_scan
 from app.tunnel_commands import acknowledge_command, enqueue_command, next_command
 
@@ -64,6 +65,59 @@ class ClientTunnelTests(unittest.TestCase):
             return connection.execute(
                 select(tunnels.c.install_id).where(tunnels.c.node_id == self.node["id"])
             ).scalar_one()
+
+    def reserve_automatically(self, headers):
+        return self.http.post(
+            "/api/v1/tunnels/register", headers=headers, json={"node_id": self.node["id"]},
+        )
+
+    def publish_node(self, **changes):
+        values = {
+            "client_channel": "both", "server_addr": "frp.example.test", "server_port": 7000,
+            **changes,
+        }
+        with self.db.begin() as connection:
+            connection.execute(nodes.update().where(nodes.c.id == self.node["id"]).values(**values))
+
+    def test_concurrent_automatic_requests_reserve_distinct_ports_then_exhaust(self):
+        self.publish_node(frp_token="fixture-frpc-token")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = pool.map(self.reserve_automatically, (self.owner, self.other))
+        self.assertEqual((first.status_code, second.status_code), (201, 201))
+        self.assertEqual({first.json()["remote_port"], second.json()["remote_port"]}, {30001, 30002})
+        self.assertEqual(first.json()["server_addr"], "frp.example.test")
+        self.assertEqual(first.json()["server_port"], 7000)
+        self.assertEqual(first.json()["public_host"], "game.example.test")
+        self.assertEqual(first.json()["frp_token"], "fixture-frpc-token")
+        exhausted = self.reserve_automatically(self.owner)
+        self.assertEqual(exhausted.status_code, 409)
+        self.assertEqual(exhausted.json()["detail"]["code"], "no_available_port")
+        self.assertEqual(self.http.delete(
+            f"/api/v1/tunnels/{first.json()['id']}", headers=self.owner,
+        ).status_code, 204)
+        self.assertEqual(self.reserve_automatically(self.owner).json()["remote_port"],
+                         first.json()["remote_port"])
+
+    def test_automatic_selection_excludes_live_and_blocked_then_uses_current_endpoint(self):
+        self.publish_node(port_end=30003, server_addr=None, server_port=17000)
+        with self.db.begin() as connection:
+            connection.execute(tunnels.insert().values(
+                id="live", node_id=self.node["id"], run_id="run", proxy_name="live",
+                remote_port=30001, status="active",
+            ))
+            connection.execute(tunnels.insert().values(
+                id="blocked", node_id=self.node["id"], run_id="run", proxy_name="blocked",
+                remote_port=30002, status="blocked", proxy_present=False,
+            ))
+            connection.execute(blocks.insert().values(
+                tunnel_id="blocked", node_id=self.node["id"], run_id="run", proxy_name="blocked",
+                port=30002, reason="fixture", source="manual", active=True, created_at=time(),
+            ))
+        response = self.reserve_automatically(self.owner)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["remote_port"], 30003)
+        self.assertEqual(response.json()["server_addr"], "game.example.test")
+        self.assertEqual(response.json()["server_port"], 17000)
 
     def test_owned_status_rejects_forged_claims_and_releases_port_after_unblock(self):
         self.assertEqual(self.reserve({}).status_code, 401)

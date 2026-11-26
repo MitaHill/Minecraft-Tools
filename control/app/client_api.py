@@ -1,16 +1,16 @@
 from hashlib import sha256
 from secrets import token_urlsafe
 from time import time
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, select, update
+from sqlalchemy import and_, delete, select, union, update
 
 from .ip_rules import canonical_ip
-from .moderation import ip_block, lock_settings
+from .moderation import ip_block, lock_settings, settings
 from .registry import blocks, installs, nodes, tunnel_claims, tunnels
 
 router = APIRouter(prefix="/api/v1")
@@ -20,7 +20,7 @@ CLAIM_SECONDS = 120
 
 class TunnelRegistration(BaseModel):
     node_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
-    remote_port: int = Field(ge=1024, le=65535, strict=True)
+    remote_port: int | None = Field(default=None, ge=1024, le=65535, strict=True)
 
 
 def digest(value: str) -> str:
@@ -54,6 +54,7 @@ Install = Annotated[str, Depends(current_install)]
 def list_public_nodes(request: Request, response: Response):
     response.headers["Cache-Control"] = "no-store"
     with request.app.state.database.connect() as connection:
+        reject_blacklisted(connection, request)
         rows = connection.execute(select(
             nodes.c.id, nodes.c.name, nodes.c.public_host, nodes.c.port_start,
             nodes.c.port_end, nodes.c.status,
@@ -61,13 +62,54 @@ def list_public_nodes(request: Request, response: Response):
         return {"nodes": [dict(row) for row in rows]}
 
 
+@router.get("/node-catalog")
+def node_catalog(request: Request, response: Response, channel: Literal["stable", "dev"] = "stable"):
+    response.headers["Cache-Control"] = "no-store"
+    with request.app.state.database.connect() as connection:
+        reject_blacklisted(connection, request)
+        updated_at = connection.execute(select(settings.c.catalog_updated_at)).scalar_one()
+        entries = connection.execute(
+            select(nodes.c.id, nodes.c.name)
+            .where(nodes.c.client_channel.in_((channel, "both")))
+            .order_by(nodes.c.id)
+        ).mappings()
+        return {
+            "blocked": False,
+            "nodes": list(map(dict, entries)),
+            "updated_at": updated_at,
+            "min_frpc_version": request.app.state.min_frpc_version,
+        }
+
+
 def request_ip(request):
     return canonical_ip(request.client.host) if request.client else None
 
 
 def reject_blacklisted(connection, request):
-    if reason := ip_block(connection, request_ip(request)):
-        raise HTTPException(403, {"code": "ip_blacklisted", "reason": reason})
+    reason = ip_block(connection, request_ip(request))
+    if reason is not None:
+        raise HTTPException(
+            403,
+            {"code": "ip_blacklisted", "blocked": True, "reason": reason},
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+def available_port(connection, node_id: str, start: int, end: int) -> int | None:
+    used = connection.scalars(union(
+        select(tunnel_claims.c.remote_port).where(
+            tunnel_claims.c.node_id == node_id, tunnel_claims.c.remote_port.between(start, end),
+        ),
+        select(blocks.c.port).where(
+            blocks.c.node_id == node_id, blocks.c.port.between(start, end), blocks.c.active.is_(True),
+        ),
+        select(tunnels.c.remote_port).where(
+            tunnels.c.node_id == node_id, tunnels.c.remote_port.between(start, end),
+            tunnels.c.proxy_present.is_(True), tunnels.c.status != "closed",
+        ),
+    ))
+    occupied = set(used)
+    return next((port for port in range(start, end + 1) if port not in occupied), None)
 
 
 @router.post("/installs/register", status_code=201)
@@ -111,50 +153,31 @@ def register_tunnel(
         )
         reject_blacklisted(connection, request)
         node = connection.execute(
-            select(nodes.c.port_start, nodes.c.port_end, nodes.c.status, nodes.c.pending_port_start).where(
-                nodes.c.id == node_id
-            )
-        ).one_or_none()
-        if node is None:
-            raise HTTPException(404, "Node not found")
-        if node.pending_port_start is not None:
+            select(nodes).where(nodes.c.id == node_id)
+        ).mappings().one_or_none()
+        automatic = port is None
+        if node is None or (automatic and node["client_channel"] == "hidden"):
+            detail = {"code": "node_not_found"} if automatic else "Node not found"
+            raise HTTPException(404, detail)
+        if automatic and node["server_port"] is None:
+            raise HTTPException(503, {"code": "node_unconfigured"})
+        if node["pending_port_start"] is not None:
             raise HTTPException(409, {"code": "node_range_pending"})
-        if not node.port_start <= port <= node.port_end:
-            raise HTTPException(422, "Port outside the node range")
-        if node.status != "online":
-            raise HTTPException(503, "Node is offline")
+        start, end = node["port_start"], node["port_end"]
+        if port is not None:
+            if not start <= port <= end:
+                raise HTTPException(422, "Port outside the node range")
+            start = end = port
+        if node["status"] != "online":
+            detail = {"code": "node_offline"} if automatic else "Node is offline"
+            raise HTTPException(503, detail)
         connection.execute(
             delete(tunnel_claims).where(tunnel_claims.c.expires_at <= now)
         )
-        reserved = (
-            select(tunnel_claims.c.id)
-            .where(
-                tunnel_claims.c.node_id == node_id,
-                tunnel_claims.c.remote_port == port,
-            )
-            .exists()
-        )
-        blocked = (
-            select(blocks.c.id)
-            .where(
-                blocks.c.node_id == node_id,
-                blocks.c.port == port,
-                blocks.c.active.is_(True),
-            )
-            .exists()
-        )
-        live = (
-            select(tunnels.c.id)
-            .where(
-                tunnels.c.node_id == node_id,
-                tunnels.c.remote_port == port,
-                tunnels.c.proxy_present.is_(True),
-                tunnels.c.status != "closed",
-            )
-            .exists()
-        )
-        if connection.execute(select(reserved | blocked | live)).scalar_one():
-            raise HTTPException(409, "Port unavailable")
+        port = available_port(connection, node_id, start, end)
+        if port is None:
+            detail = {"code": "no_available_port"} if automatic else "Port unavailable"
+            raise HTTPException(409, detail)
         connection.execute(
             tunnel_claims.insert().values(
                 id=claim_id,
@@ -166,7 +189,16 @@ def register_tunnel(
             )
         )
     response.headers["Cache-Control"] = "no-store"
-    return {"id": claim_id, "proxy_name": f"minecraft-{claim_id}", "proof": proof}
+    result = {"id": claim_id, "proxy_name": f"minecraft-{claim_id}", "proof": proof}
+    if automatic:
+        result.update(
+            remote_port=port,
+            server_addr=node["server_addr"] or node["public_host"],
+            server_port=node["server_port"],
+            public_host=node["public_host"],
+            frp_token=node["frp_token"] or "",
+        )
+    return result
 
 
 def claim_status(connection, claim_id: str, install_id: str, now: float, client_ip=None):

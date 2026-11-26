@@ -1,4 +1,4 @@
-from time import time
+from time import time, time_ns
 
 from sqlalchemy import Boolean, Column, Float, Integer, String, Table, func, or_, select, update
 
@@ -11,6 +11,7 @@ settings = Table(
     Column("id", Integer, primary_key=True),
     Column("lobby_enabled", Boolean, nullable=False),
     Column("blacklist_revision", Integer, nullable=False),
+    Column("catalog_updated_at", Integer, nullable=False),
 )
 blacklist = Table(
     "ip_blacklist",
@@ -73,6 +74,14 @@ def live_tunnels(now):
 
 def lock_settings(connection):
     connection.execute(update(settings).values(lobby_enabled=settings.c.lobby_enabled))
+
+
+def touch_node_catalog(connection):
+    connection.execute(
+        update(settings).values(
+            catalog_updated_at=func.max(time_ns() // 1_000_000, settings.c.catalog_updated_at + 1)
+        )
+    )
 
 
 def node_policy(database, node_id):

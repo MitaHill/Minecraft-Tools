@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 from contextlib import suppress
@@ -9,7 +10,10 @@ from tempfile import NamedTemporaryFile
 from PySide6.QtCore import QObject, QStandardPaths, QUrl
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 
-from minecrafttools.config import TunnelClaim
+from minecrafttools.config import Node, TunnelClaim, TunnelReservation, valid_host
+from minecrafttools.node_catalog import NodeCatalog
+
+logger = logging.getLogger(__name__)
 
 
 def control_base() -> str:
@@ -36,6 +40,27 @@ def valid_token(value) -> bool:
     )
 
 
+def blacklist_message(data: dict) -> str:
+    detail = data.get("detail")
+    if isinstance(detail, dict) and detail.get("code") == "ip_blacklisted":
+        reason = detail.get("reason")
+        return "客户端 IP 已被封禁。" + (reason if isinstance(reason, str) else "")
+    return ""
+
+
+def save_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with NamedTemporaryFile(dir=path.parent, delete=False, mode="w", encoding="utf-8") as file:
+        temp = Path(file.name)
+        try:
+            json.dump(data, file)
+            file.close()
+            temp.replace(path)
+        finally:
+            with suppress(FileNotFoundError):
+                temp.unlink()
+
+
 class TunnelControl(QObject):
     def __init__(self, parent: QObject, base: str):
         super().__init__(parent)
@@ -45,8 +70,12 @@ class TunnelControl(QObject):
         ) or QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppLocalDataLocation,
         )
-        filename = "install-" + sha256(base.encode()).hexdigest() + ".json"
-        self.credentials_path = Path(data_root) / filename
+        source = sha256(base.encode()).hexdigest()
+        self.credentials_path = Path(data_root) / f"install-{source}.json"
+        self.channel = (
+            "dev" if os.environ.get("MINECRAFTTOOLS_BUILD_CHANNEL") == "dev" else "stable"
+        )
+        self.catalog_path = Path(data_root) / f"nodes-{source}-{self.channel}.json"
         self.token = ""
         if base:
             try:
@@ -58,20 +87,27 @@ class TunnelControl(QObject):
         self.network = QNetworkAccessManager(self)
 
     def save_install(self, data: dict) -> None:
-        self.credentials_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with NamedTemporaryFile(
-            dir=self.credentials_path.parent, delete=False, mode="w", encoding="utf-8"
-        ) as file:
-            temp = Path(file.name)
-            try:
-                json.dump(
-                    {"install_id": data["install_id"], "token": data["token"]}, file
-                )
-                file.close()
-                temp.replace(self.credentials_path)
-            finally:
-                with suppress(FileNotFoundError):
-                    temp.unlink()
+        save_json(self.credentials_path, {"install_id": data["install_id"], "token": data["token"]})
+
+    def cached_catalog(self) -> NodeCatalog | None:
+        try:
+            return NodeCatalog.from_payload(json.loads(self.catalog_path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            logger.warning("无法读取本地线路清单缓存。")
+            return None
+
+    def fetch_catalog(self, callback) -> None:
+        self.request(b"GET", f"node-catalog?channel={self.channel}", callback, authorized=False)
+
+    def cache_catalog(self, catalog: NodeCatalog) -> None:
+        if catalog == self.cached_catalog():
+            return
+        try:
+            save_json(self.catalog_path, catalog.payload())
+        except OSError:
+            logger.warning("无法保存本地线路清单缓存。")
 
     def request(
         self, method: bytes, route: str, callback=None, payload=None, *, authorized=True
@@ -111,22 +147,26 @@ class TunnelControl(QObject):
 
         reply.finished.connect(finished)
 
-    def nodes(self, callback) -> None:
-        self.request(b"GET", "nodes", callback, authorized=False)
-
-    def reserve(self, node_id: str, port: int, callback) -> None:
+    def reserve(self, node_id: str, callback) -> None:
         def enroll():
             self.request(b"POST", "installs/register", enrolled, authorized=False)
 
         def denied(data):
+            if message := blacklist_message(data):
+                callback(None, message)
+                return True
             detail = data.get("detail")
             if isinstance(detail, dict):
-                if detail.get("code") == "ip_blacklisted":
-                    reason = detail.get("reason")
-                    callback(None, f"客户端 IP 已被拉黑。{reason or ''}")
-                    return True
-                if detail.get("code") == "node_range_pending":
-                    callback(None, "节点正在更新端口范围，请稍后重试。")
+                messages = {
+                    "node_range_pending": "节点正在更新端口范围，请稍后重试。",
+                    "node_not_found": "线路已下架，请重新打开软件刷新线路清单。",
+                    "node_unconfigured": "此线路尚未完成配置，请换个节点。",
+                    "node_offline": "节点当前离线，请换个节点或稍后重试。",
+                    "no_available_port": "此节点暂无可用端口，请换个节点或稍后重试。",
+                }
+                error = detail.get("code")
+                if isinstance(error, str) and error in messages:
+                    callback(None, messages[error])
                     return True
             return False
 
@@ -157,25 +197,33 @@ class TunnelControl(QObject):
                 enroll()
                 return
             claim_id = data.get("id")
-            if (
-                code == 201
-                and isinstance(claim_id, str)
-                and re.fullmatch(r"[0-9a-f]{32}", claim_id)
-                and data.get("proxy_name") == f"minecraft-{claim_id}"
-                and valid_token(data.get("proof"))
+            if not (
+                code == 201 and isinstance(claim_id, str) and re.fullmatch(r"[0-9a-f]{32}", claim_id)
+                and data.get("proxy_name") == f"minecraft-{claim_id}" and valid_token(data.get("proof"))
             ):
-                callback(TunnelClaim(claim_id, data["proxy_name"], data["proof"]), "")
-            elif code == 409:
-                callback(None, "远程端口已占用或暂停使用，请选择其他端口。")
-            else:
                 callback(None, "无法注册隧道，请检查节点配置和控制端连接。")
+                return
+            claim = TunnelClaim(claim_id, data["proxy_name"], data["proof"])
+            port, server_port = data.get("remote_port"), data.get("server_port")
+            host, public_host = data.get("server_addr"), data.get("public_host")
+            token = data.get("frp_token", "")
+            if not (
+                type(port) is int and 1024 <= port <= 65535
+                and type(server_port) is int and 1 <= server_port <= 65535
+                and valid_host(host) and valid_host(public_host) and isinstance(token, str)
+            ):
+                self.release(claim)
+                callback(None, "控制端返回的线路配置无效，请稍后重试。")
+                return
+            node = Node(host, server_port, token, public_host)
+            callback(TunnelReservation(claim, node, port), "")
 
         def request_port(retry):
             self.request(
                 b"POST",
                 "tunnels/register",
                 lambda code, data: reserved(code, data, retry),
-                {"node_id": node_id, "remote_port": port},
+                {"node_id": node_id},
             )
 
         if self.token:

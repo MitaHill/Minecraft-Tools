@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from argon2 import PasswordHasher, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from sqlalchemy import Column, Float, String, Table, delete, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,6 +31,7 @@ from .moderation import (
     lock_settings,
     removals,
     settings,
+    touch_node_catalog,
 )
 from .rate_limit import RateLimit
 from .registry import blocks, nodes, tunnel_claims, tunnels
@@ -99,12 +100,41 @@ class NodeConfiguration(BaseModel):
     public_host: str = Field(min_length=1, max_length=253)
     port_start: int = Field(ge=1024, le=65535)
     port_end: int = Field(ge=1024, le=65535)
+    server_addr: str | None = Field(default=None, max_length=253)
+    server_port: int | None = Field(default=None, ge=1, le=65535, strict=True)
+    frp_token: SecretStr | None = Field(default=None, max_length=1024)
+    client_channel: Literal["hidden", "dev", "stable", "both"] = "hidden"
+
+    @field_validator("public_host", "server_addr")
+    @classmethod
+    def validate_host(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        host = value.strip().rstrip(".").lower()
+        parsed = urlsplit(f"//[{host}]" if ":" in host else f"//{host}")
+        if (
+            parsed.hostname != host or parsed.netloc != (f"[{host}]" if ":" in host else host)
+            or any(char.isspace() or char in "/\\?#@[]" for char in host)
+        ):
+            raise ValueError("请输入有效的主机名或 IP")
+        return host
 
     @model_validator(mode="after")
     def validate_port_range(self):
+        if not self.name.strip():
+            raise ValueError("请输入节点名称")
         if self.port_end < self.port_start:
             raise ValueError("port_end must be greater than or equal to port_start")
         return self
+
+    def client_config(self) -> dict:
+        values = self.model_dump(
+            include={"server_addr", "server_port", "frp_token", "client_channel"},
+            exclude_unset=True,
+        )
+        if "frp_token" in values and self.frp_token is not None:
+            values["frp_token"] = self.frp_token.get_secret_value() or None
+        return values
 
 
 class NodeRegistration(NodeConfiguration):
@@ -243,7 +273,8 @@ def logout(request: Request, response: Response):
 @router.get("/nodes")
 def list_nodes(request: Request, _account: SignedIn):
     query = select(
-        *(column for column in nodes.c if column.name != "token_hash")
+        *(column for column in nodes.c if column.name not in ("token_hash", "frp_token")),
+        nodes.c.frp_token.is_not(None).label("frp_token_configured"),
     ).order_by(nodes.c.id)
     with request.app.state.database.connect() as connection:
         items = [dict(row) for row in connection.execute(query).mappings()]
@@ -256,14 +287,23 @@ def register_node(
 ):
     if account.role != "superadmin":
         raise HTTPException(403, "Superadmin permission required")
+    if payload.client_channel != "hidden" and payload.server_port is None:
+        raise HTTPException(422, "发布线路前需要填写 frpc 连接端口")
     token = token_urlsafe(32)
     statement = sqlite_insert(nodes).values(
-        **payload.model_dump(), token_hash=token_digest(token)
+        **payload.model_dump(exclude={
+            "name", "server_addr", "server_port", "frp_token", "client_channel",
+        }),
+        **payload.client_config(),
+        name=payload.name.strip(),
+        token_hash=token_digest(token),
     )
     statement = statement.on_conflict_do_nothing(index_elements=[nodes.c.id])
     with request.app.state.database.begin() as connection:
         if connection.execute(statement).rowcount != 1:
             raise HTTPException(409, "Node already exists")
+        if payload.client_channel != "hidden":
+            touch_node_catalog(connection)
         record_admin_action(connection, account.username, "node.register", payload.id)
     response.headers["Cache-Control"] = "no-store"
     return {"id": payload.id, "secret": token}
@@ -368,24 +408,18 @@ def rescan_tunnel(tunnel_id: str, request: Request, account: Operator):
 def edit_node(node_id: str, payload: NodeConfiguration, request: Request, account: SignedIn):
     if account.role != "superadmin":
         raise HTTPException(403, "Superadmin permission required")
-    name, host = payload.name.strip(), payload.public_host.strip().rstrip(".").lower()
-    try:
-        parsed = urlsplit(f"//[{host}]" if ":" in host else f"//{host}")
-        valid_host = (
-            parsed.hostname == host and not parsed.path and not parsed.query
-            and not parsed.fragment and parsed.username is None
-            and not any(char.isspace() or char in "/\\?#@[]" for char in host)
-        )
-    except ValueError:
-        valid_host = False
-    if not name or not host or not valid_host:
-        raise HTTPException(422, "请输入有效的节点名称和公网主机名或 IP")
+    name, host = payload.name.strip(), payload.public_host
     start, end = payload.port_start, payload.port_end
+    client_config = payload.client_config()
     with request.app.state.database.begin() as connection:
         lock_settings(connection)
         node = connection.execute(select(nodes).where(nodes.c.id == node_id)).mappings().one_or_none()
         if node is None:
             raise HTTPException(404, "节点不存在")
+        channel = client_config.get("client_channel", node["client_channel"])
+        server_port = client_config.get("server_port", node["server_port"])
+        if channel != "hidden" and server_port is None:
+            raise HTTPException(422, "发布线路前需要填写 frpc 连接端口")
         changing_range = (start, end) != (node["port_start"], node["port_end"])
         changing_host = host != node["public_host"]
         if node["pending_port_start"] is not None:
@@ -407,7 +441,7 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
             if conflicts:
                 ports = "、".join(map(str, conflicts))
                 raise HTTPException(409, f"以下端口仍在使用或预留：{ports}")
-        values = {"name": name, "public_host": host}
+        values = {"name": name, "public_host": host, **client_config}
         if changing_range:
             deployed = node["deployed_ports"]
             if deployed is None:
@@ -419,6 +453,8 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
                 range_revision=node["range_revision"] + 1, range_error=None,
             )
         connection.execute(update(nodes).where(nodes.c.id == node_id).values(**values))
+        if channel != node["client_channel"] or (channel != "hidden" and name != node["name"]):
+            touch_node_catalog(connection)
         record_admin_action(connection, account.username, "node.edit", node_id)
     return {"pending": changing_range}
 

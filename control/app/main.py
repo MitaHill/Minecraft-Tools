@@ -53,6 +53,10 @@ async def lifespan(app: FastAPI):
         environ.get("CONTROL_ADMIN_USERS_FILE", ""),
         secure_cookie=environ.get("CONTROL_ADMIN_COOKIE_SECURE", "1") != "0",
     )
+    min_frpc_version = environ.get("CONTROL_MIN_FRPC_VERSION", "0.72.0")
+    if not fullmatch(r"[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}", min_frpc_version):
+        raise ValueError("CONTROL_MIN_FRPC_VERSION must be a version such as 0.72.0")
+    app.state.min_frpc_version = min_frpc_version
     database = open_database(data_dir)
     app.state.database = database
     app.state.release_dir = Path(

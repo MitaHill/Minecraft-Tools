@@ -401,5 +401,5 @@ class MigrationTests(unittest.TestCase):
                     report = connection.exec_driver_sql(
                         "SELECT report FROM diagnostics"
                     ).scalar_one()
-                self.assertEqual(revision, "0009_cidr_blacklist")
+                self.assertEqual(revision, "0010_client_node_catalog")
                 self.assertEqual(json.loads(report), {"stage": "ready"})

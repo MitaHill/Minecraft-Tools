@@ -6,12 +6,11 @@ import shutil
 import subprocess
 import sys
 import tarfile
-from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from minecrafttools.config import Node, load_nodes, write_frpc_config
+from minecrafttools.config import Node, TunnelClaim, write_frpc_config
 
 CLIENT = Path(__file__).resolve().parents[1]
 NAME = "MinecraftTools"
@@ -24,26 +23,10 @@ def output_dirs() -> tuple[Path, Path]:
     return dist, work
 
 
-def write_node_catalog(directory: Path, nodes: list[Node]) -> None:
-    lines = [
-        "from minecrafttools.config import Node",
-        "",
-        "NODES = (",
-    ]
-    for node in nodes:
-        fields = ", ".join(f"{key}={value!r}" for key, value in asdict(node).items())
-        lines.append(f"    Node({fields}),")
-    lines.append(")")
-    (directory / "_minecrafttools_build_nodes.py").write_text(
-        "\n".join(lines) + "\n", encoding="utf-8"
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(description="Build and validate a native MinecraftTools archive.")
     parser.add_argument("--frpc", type=Path, required=True)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--nodes-file", type=Path, help="TOML node catalog to embed")
     args = parser.parse_args()
     release_version = re.fullmatch(r"([0-9]{4}-[0-9]{2}-[0-9]{2})-[1-9][0-9]*", args.version)
     if release_version:
@@ -53,9 +36,6 @@ def main():
             parser.error("release version must contain a valid calendar date")
     elif not re.fullmatch(r"ci-[0-9a-f]+|local", args.version):
         parser.error("version must be yyyy-mm-dd-n (n starts at 1), ci-<sha> or local")
-    if release_version and args.nodes_file is None:
-        parser.error("a release build requires --nodes-file")
-    nodes = load_nodes(args.nodes_file or CLIENT / "nodes.example.toml")
     system = platform.system().lower()
     arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
     if system not in {"windows", "darwin", "linux"}:
@@ -79,12 +59,8 @@ def main():
         cmd.extend(["--icon", str(source / "logo.ico")])
     if system == "darwin":
         cmd.extend(["--osx-bundle-identifier", "com.mitahill.minecrafttools"])
-    with TemporaryDirectory(dir=work) as directory:
-        catalog = Path(directory)
-        write_node_catalog(catalog, nodes)
-        cmd.extend(["--paths", str(catalog)])
-        cmd.append(str(source / "__main__.py"))
-        subprocess.run(cmd, check=True, cwd=CLIENT)
+    cmd.append(str(source / "__main__.py"))
+    subprocess.run(cmd, check=True, cwd=CLIENT)
 
     bundle = dist / NAME
     executable = bundle / (NAME + ".exe" if system == "windows" else NAME)
@@ -94,8 +70,9 @@ def main():
     env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
     with TemporaryDirectory() as directory:
         config = Path(directory) / "frpc.toml"
-        node = nodes[0]
-        write_frpc_config(config, node, 25565, node.remote_port_start or 25566)
+        claim_id = "0" * 32
+        claim = TunnelClaim(claim_id, f"minecraft-{claim_id}", "A" * 43)
+        write_frpc_config(config, Node("127.0.0.1", 7000), 25565, 25566, claim)
         subprocess.run([str(frpc), "verify", "-c", str(config)], check=True, timeout=15)
         subprocess.run([str(executable), "--smoke-test"], env=env, check=True, timeout=30)
 

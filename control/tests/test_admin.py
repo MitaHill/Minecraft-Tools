@@ -155,6 +155,56 @@ class AdminTests(unittest.TestCase):
                 [("owner", "node.register", "test-node"), ("owner", "tunnel.rescan", "a")],
             )
 
+    def test_publish_rename_and_hide_node_on_next_catalog_request(self):
+        self.assertEqual(self.sign_in("owner").status_code, 200)
+        url = "/api/v1/node-catalog?channel=dev"
+        initial = self.http.get(url).json()
+        self.assertFalse(initial["blocked"])
+        self.assertEqual(initial["nodes"], [])
+        self.assertEqual(initial["min_frpc_version"], app.state.min_frpc_version)
+        payload = {
+            "id": "test-node", "name": "Test Node", "public_host": "game.example",
+            "port_start": 30001, "port_end": 30002, "client_channel": "dev",
+        }
+        self.assertEqual(self.http.post("/api/admin/nodes", json=payload).status_code, 422)
+        payload.update(server_port=7000, frp_token="fixture-frpc-token")
+        self.assertEqual(self.http.post("/api/admin/nodes", json=payload).status_code, 201)
+        published = self.http.get(url).json()
+        self.assertEqual(published["nodes"], [{"id": "test-node", "name": "Test Node"}])
+        self.assertGreater(published["updated_at"], initial["updated_at"])
+        self.assertEqual(self.http.get(url).json(), published)
+        self.assertEqual(self.http.get("/api/v1/node-catalog").json()["nodes"], [])
+        (admin_node,) = self.http.get("/api/admin/nodes").json()["nodes"]
+        self.assertTrue(admin_node["frp_token_configured"])
+        self.assertNotIn("frp_token", admin_node)
+        payload = {key: payload[key] for key in ("public_host", "port_start", "port_end")}
+        edit = "/api/admin/nodes/test-node"
+        self.assertEqual(self.http.patch(edit, json={**payload, "name": "Renamed"}).status_code, 200)
+        renamed = self.http.get(url).json()
+        self.assertEqual(renamed["nodes"], [{"id": "test-node", "name": "Renamed"}])
+        self.assertGreater(renamed["updated_at"], published["updated_at"])
+        self.assertEqual(self.http.patch(edit, json={
+            **payload, "name": "Renamed", "client_channel": "hidden",
+        }).status_code, 200)
+        hidden = self.http.get(url).json()
+        self.assertEqual(hidden["nodes"], [])
+        self.assertGreater(hidden["updated_at"], renamed["updated_at"])
+
+    def test_blacklisted_requests_get_a_reason_and_no_catalog(self):
+        with app.state.database.begin() as connection:
+            connection.execute(blacklist.insert().values(
+                ip="192.0.2.0/24", reason="Please contact support", actor="fixture", created_at=time(),
+            ))
+        client = TestClient(app, base_url="https://control.test", client=("192.0.2.14", 50000))
+        self.addCleanup(client.close)
+        for route in ("/api/v1/node-catalog", "/api/v1/nodes"):
+            response = client.get(route)
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(response.json(), {"detail": {
+                "code": "ip_blacklisted", "blocked": True, "reason": "Please contact support",
+            }})
+
     def test_invalid_credentials_and_cross_origin_requests(self):
         payload = {"username": "reader", "password": "wrong"}
         response = self.http.post(

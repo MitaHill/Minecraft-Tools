@@ -20,7 +20,7 @@
 ./dev.sh uv run --project client --no-sync python client/scripts/build.py --frpc /tmp/minecrafttools-build/frp/frpc --version local
 ```
 
-产物在 `/tmp/minecrafttools-build/dist/artifacts/`，文件名以 `MinecraftTools-` 开头。不经过 `dev.sh` 直接运行 `build.py` 时仍写回 `client/dist/`，可以用 `MINECRAFTTOOLS_DIST_DIR` 和 `MINECRAFTTOOLS_WORK_DIR` 改到项目外。默认本地构建内置样例线路，也可以在命令末尾加 `--nodes-file client/nodes.local.toml` 打包自定义节点。配置大厅服务时，设置 `MINECRAFTTOOLS_LOBBY_URL` 为服务的 `/api/lobby` 地址。
+产物在 `/tmp/minecrafttools-build/dist/artifacts/`，文件名以 `MinecraftTools-` 开头。不经过 `dev.sh` 直接运行 `build.py` 时仍写回 `client/dist/`，可以用 `MINECRAFTTOOLS_DIST_DIR` 和 `MINECRAFTTOOLS_WORK_DIR` 改到项目外。本地构建从控制端读取线路。直启 MainApp 调试时，使用 `MINECRAFTTOOLS_CONTROL_URL` 指定控制端。配置大厅服务时，设置 `MINECRAFTTOOLS_LOBBY_URL` 为服务的 `/api/lobby` 地址。
 
 ## GitHub Actions 发布
 
@@ -36,7 +36,7 @@ GitHub Actions 在 Windows、macOS 和 Linux 上分别构建 amd64 和 arm64。�
 
 签名清单的有效期是 365 天。空的通道也发布已签名清单；一年内没有新版本时需要手动重签。macOS 安装包暂用 ad-hoc 签名，Windows 安装包未做 Authenticode；正式签名和公证需要另外的凭据素材。
 
-日期标签构建需要预先在 GitHub 的 `dev` 与 `stable` Environment 配置变量 `MINECRAFTTOOLS_NODES_TOML`，用 [节点样例](../client/nodes.example.toml) 的格式填写只含可公开发布字段的目录。一次发布先把选定通道的目录上传为本次运行的产物，再由六个构建作业使用同一份输入。[GitHub Actions 变量上下文](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#vars-context)
+六个平台的构建共用同一套打包流程。节点由 Control Server 管理，MainApp 每次启动时读取对应通道的清单。[节点清单与端口分配](node-catalog.md)
 
 控制端和香港 dev Agent 都使用 `https://ctl.mctools.mitahill.com`（Phoenix）。旧 Agent 的原生 TLS 入口为 `us-6.mitahill.com:19443`。Control Server 的部署与入口拓扑见[控制端联调环境](control-server.md#13-分阶段实施)。
 

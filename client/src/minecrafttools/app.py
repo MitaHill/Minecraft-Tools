@@ -1,13 +1,10 @@
 import argparse
 import logging
 import os
-import random
 import socket
 import subprocess
 import sys
-from dataclasses import replace
 from datetime import datetime
-from ipaddress import IPv6Address
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
@@ -31,10 +28,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from minecrafttools.config import Node, TunnelClaim, write_frpc_config
-from minecrafttools.control import TunnelControl, control_base
+from minecrafttools.config import TunnelReservation, write_frpc_config
+from minecrafttools.control import TunnelControl, blacklist_message, control_base
 from minecrafttools.lobby import LobbyTab, room_payload
-from minecrafttools.node_catalog import NODES
+from minecrafttools.node_catalog import NodeCatalog, version_tuple
 from minecrafttools.styles import STYLE
 
 ANNOUNCEMENTS = QUrl("https://b.clash.ink/archives/mi-ta-shan-lian-ji-gong-ju")
@@ -60,11 +57,13 @@ def client_settings() -> QSettings:
 
 
 class MappingWindow(QWidget):
-    def __init__(self, frpc: Path, nodes: tuple[Node, ...] = NODES):
+    def __init__(self, frpc: Path, frpc_version: tuple[int, int, int] | None):
         super().__init__()
         self.setWindowTitle("MinecraftTools")
         self.resize(400, 550)
         self.frpc = frpc
+        self.frpc_version = frpc_version
+        self.catalog_ready = False
         self.settings = client_settings()
         self.config_dir: TemporaryDirectory | None = None
         self.output = bytearray()
@@ -73,11 +72,8 @@ class MappingWindow(QWidget):
         self.stopping = False
         self.registering = False
         self.closing = False
-        self.claim: TunnelClaim | None = None
+        self.reservation: TunnelReservation | None = None
         self.publication_removed = False
-        self.running_node: Node | None = None
-        self.updated_nodes: dict[str, Node] = {}
-        self.node_request = 0
         self.status_pending = False
         self.renew_at = 0.0
         self.control = TunnelControl(self, control_base())
@@ -99,17 +95,17 @@ class MappingWindow(QWidget):
         self.status_timer.timeout.connect(self.poll_tunnel)
 
         self.node = QComboBox()
+        self.node.setEnabled(False)
         self.local_port = QSpinBox()
         self.local_port.setRange(1, 65535)
         self.local_port.setValue(25565)
-        self.remote_port = QSpinBox()
-        self.remote_port.setRange(1, 65535)
-        self.remote_port.setValue(random.randint(10000, 65534))
-        self.node.currentIndexChanged.connect(self.refresh_node)
         self.start_button = QPushButton("启动映射")
-        self.start_button.setEnabled(bool(nodes))
+        self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.toggle_mapping)
-        self.status = QLabel("" if nodes else "此构建没有可用线路。")
+        self.retry_catalog = QPushButton("重试读取线路")
+        self.retry_catalog.clicked.connect(self.refresh_catalog)
+        self.retry_catalog.hide()
+        self.status = QLabel("正在读取线路清单…")
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         self.link = QLineEdit()
@@ -131,9 +127,6 @@ class MappingWindow(QWidget):
         self.announcements_index = self.tabs.addTab(self.announcements_page(), "线上公告")
         QVBoxLayout(self).addWidget(self.tabs)
 
-        for node in nodes:
-            self.node.addItem(node.name, node)
-
     def mapping_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -149,7 +142,6 @@ class MappingWindow(QWidget):
 
         ports = QFormLayout()
         ports.addRow("输入本地端口:", self.local_port)
-        ports.addRow("远程端口:", self.remote_port)
         layout.addLayout(ports)
         self.public_room = QGroupBox("发布到联机大厅")
         self.public_room.setCheckable(True)
@@ -184,6 +176,7 @@ class MappingWindow(QWidget):
         address.addRow("映射地址:", self.link)
         layout.addLayout(address)
         layout.addWidget(self.status)
+        layout.addWidget(self.retry_catalog)
         return page
 
     def settings_page(self):
@@ -223,58 +216,56 @@ class MappingWindow(QWidget):
     def set_status(self, message: str):
         if self.status.text() != message:
             self.status.setText(message)
-            self.append_log(message)
+            if message:
+                self.append_log(message)
 
-    def update_remote_ports(self, node: Node):
-        start, end = node.port_range
-        previous = self.remote_port.value()
-        self.remote_port.setRange(start, end)
-        if not start <= previous <= end:
-            self.remote_port.setValue(random.randint(start, end))
+    def show_catalog(self, catalog: NodeCatalog | None):
+        self.node.clear()
+        if catalog:
+            for node_id, name in catalog.nodes:
+                self.node.addItem(name, node_id)
+        self.node.setEnabled(self.catalog_ready and self.node.count() > 0)
+        self.start_button.setEnabled(self.node.isEnabled())
 
-    @staticmethod
-    def configured_node(node, code, data):
-        if code == 404:
-            return node  # Older Control Server versions lack the node directory.
-        entries = data.get("nodes")
-        if code != 200 or not isinstance(entries, list):
-            return None
-        for row in entries:
-            if not isinstance(row, dict) or row.get("id") != node.node_id:
-                continue
-            start, end, host = row.get("port_start"), row.get("port_end"), row.get("public_host")
-            if (
-                type(start) is int and type(end) is int and 1024 <= start <= end <= 65535
-                and isinstance(host, str) and host
-                and not any(char.isspace() or char in "[]/\\?#@" for char in host)
-            ):
-                if ":" in host:
-                    try:
-                        IPv6Address(host)
-                    except ValueError:
-                        return None
-                return replace(node, public_host=host, remote_port_start=start, remote_port_end=end)
-            break
-        return None
-
-    def refresh_node(self):
-        self.node_request += 1
-        request = self.node_request
-        node = self.node.currentData()
-        if node is None:
+    def refresh_catalog(self):
+        self.catalog_ready = False
+        self.node.setEnabled(False)
+        self.start_button.setEnabled(False)
+        self.retry_catalog.hide()
+        if not self.control.base:
+            self.set_status("无法连接控制端，请通过 Launcher 启动。")
             return
-        self.update_remote_ports(self.updated_nodes.get(node.node_id, node))
-        if not (node.node_id and self.control.base):
+        self.set_status("正在读取线路清单…")
+        self.control.fetch_catalog(self.catalog_received)
+
+    def catalog_received(self, code, data):
+        if self.closing:
             return
-
-        def received(code, data):
-            if request != self.node_request or self.registering or self.closing:
-                return
-            if updated := self.configured_node(node, code, data):
-                self.updated_nodes[node.node_id] = updated
-                self.update_remote_ports(updated)
-
-        self.control.nodes(received)
+        if code == 403:
+            self.show_catalog(None)
+            self.set_status(blacklist_message(data) or "控制端拒绝访问线路清单。")
+            return
+        try:
+            catalog = NodeCatalog.from_payload(data) if code == 200 else None
+        except ValueError:
+            catalog = None
+        if catalog is None:
+            cached = self.control.cached_catalog()
+            self.show_catalog(cached)
+            self.set_status("线路未刷新，请重试。" if cached else "无法读取线路清单，请重试。")
+            self.retry_catalog.show()
+            return
+        self.control.cache_catalog(catalog)
+        if not catalog.nodes:
+            self.set_status("当前没有可用线路。")
+        elif self.frpc_version is None:
+            self.set_status("无法读取 frpc 版本，请检查安装是否完整。")
+        elif self.frpc_version < version_tuple(catalog.min_frpc_version):
+            self.set_status(f"线路需要 frpc {catalog.min_frpc_version} 或更高版本，请更新 MinecraftTools。")
+        else:
+            self.catalog_ready = True
+            self.set_status("")
+        self.show_catalog(catalog)
 
     def toggle_mapping(self):
         if self.registering or self.stopping or self.closing:
@@ -282,8 +273,8 @@ class MappingWindow(QWidget):
         if self.process.state() != QProcess.ProcessState.NotRunning:
             self.stop_mapping()
             return
-        node = self.node.currentData()
-        if node is None:
+        node_id = self.node.currentData()
+        if not self.catalog_ready or node_id is None:
             return
         if not self.frpc.is_file():
             self.set_status("找不到 frpc，请使用包含当前平台 frpc 的构建。")
@@ -291,56 +282,29 @@ class MappingWindow(QWidget):
 
         self.failure = ""
         self.publication_removed = False
-        if node.node_id:
-            if not self.control.base:
-                self.set_status("受控节点需要可用的 Control Server，请通过 Launcher 启动。")
-                return
-            self.registering = True
-            self.set_mapping_controls(True)
-            self.start_button.setEnabled(False)
-            port = self.remote_port.value()
-            self.set_status("正在同步节点配置…")
+        self.registering = True
+        self.set_mapping_controls(True)
+        self.start_button.setEnabled(False)
+        self.set_status("正在申请映射端口…")
+        self.control.reserve(node_id, self.start_registered)
 
-            def reserve(code, data):
-                if self.closing:
-                    self.registering = False
-                    return
-                updated = self.configured_node(node, code, data)
-                if updated is None:
-                    self.start_registered(node, None, "无法读取节点当前的端口范围。")
-                    return
-                self.updated_nodes[node.node_id] = updated
-                self.update_remote_ports(updated)
-                start, end = updated.port_range
-                if not start <= port <= end:
-                    self.start_registered(updated, None, "节点端口范围已更新，请选择新的远程端口。")
-                    return
-                self.set_status("正在注册隧道…")
-                self.control.reserve(updated.node_id, port, lambda claim, error:
-                                     self.start_registered(updated, claim, error))
-
-            self.control.nodes(reserve)
-            return
-        self.start_mapping(node)
-
-    def start_registered(self, node: Node, claim: TunnelClaim | None, error: str):
+    def start_registered(self, reservation: TunnelReservation | None, error: str):
         self.registering = False
         if self.closing:
-            if claim:
-                self.control.release(claim)
+            if reservation:
+                self.control.release(reservation.claim)
             return
-        if claim is None:
+        if reservation is None:
             self.failure = error
             self.mapping_finished()
             return
-        self.claim = claim
-        self.start_mapping(node)
+        self.reservation = reservation
 
-    def start_mapping(self, node: Node):
+        node, port, claim = reservation.node, reservation.port, reservation.claim
         try:
             self.config_dir = TemporaryDirectory(prefix="minecrafttools-")
             config = Path(self.config_dir.name) / "frpc.toml"
-            write_frpc_config(config, node, self.local_port.value(), self.remote_port.value(), self.claim)
+            write_frpc_config(config, node, self.local_port.value(), port, claim)
         except (OSError, UnicodeError):
             self.failure = "无法写入临时配置。"
             self.mapping_finished()
@@ -351,25 +315,23 @@ class MappingWindow(QWidget):
             return
 
         self.output.clear()
-        self.running_node = node
-        self.address = node.address(self.remote_port.value())
+        self.address = node.address(port)
         self.set_mapping_controls(True)
         self.set_status("正在连接节点…")
         self.start_timeout.start(20_000)
         self.process.start(str(self.frpc), ["-c", str(config)])
-        if self.claim:
-            self.renew_at = monotonic() + 25
-            self.status_timer.start()
+        self.renew_at = monotonic() + 25
+        self.status_timer.start()
 
     def poll_tunnel(self):
-        claim = self.claim
-        if not claim or self.status_pending or self.stopping or self.closing:
+        reservation = self.reservation
+        if not reservation or self.status_pending or self.stopping or self.closing:
             return
         self.status_pending = True
         renew = monotonic() >= self.renew_at
 
         def finished(code, payload):
-            if self.claim is not claim:
+            if self.reservation is not reservation:
                 return
             self.status_pending = False
             if self.stopping or self.closing:
@@ -388,14 +350,14 @@ class MappingWindow(QWidget):
                 return
             self.stop_mapping()
 
-        self.control.status(claim, renew, finished)
+        self.control.status(reservation.claim, renew, finished)
 
     def set_mapping_controls(self, running: bool):
-        for widget in (self.node, self.local_port, self.remote_port):
-            widget.setEnabled(not running)
+        self.node.setEnabled(not running and self.catalog_ready)
+        self.local_port.setEnabled(not running)
         self.public_room.setEnabled(not running and bool(self.lobby.api))
         self.start_button.setText("停止映射" if running else "启动映射")
-        self.start_button.setEnabled(self.node.count() > 0)
+        self.start_button.setEnabled(self.catalog_ready and self.node.count() > 0)
         if not running:
             self.republish.hide()
             self.link.clear()
@@ -432,20 +394,21 @@ class MappingWindow(QWidget):
         self.republish.show()
 
     def publish_room(self):
-        node = self.running_node
-        if not node or not self.public_room.isChecked() or self.lobby.active_room is not None:
+        reservation = self.reservation
+        if not reservation or not self.public_room.isChecked() or self.lobby.active_room is not None:
             return
+        node = reservation.node
         self.publication_removed = False
         self.republish.hide()
         room = room_payload(
             node.public_host or node.server_addr,
-            self.remote_port.value(),
+            reservation.port,
             self.room_name.text().strip(),
             self.room_description.text().strip(),
             self.room_players.value(),
         )
-        if self.claim and self.lobby.control_lobby:
-            room["claim_id"] = self.claim.id
+        if self.lobby.control_lobby:
+            room["claim_id"] = reservation.claim.id
         self.lobby.publish(room)
 
     def mapping_timed_out(self):
@@ -470,15 +433,14 @@ class MappingWindow(QWidget):
             self.mapping_finished()
 
     def mapping_finished(self, exit_code=0):
-        self.running_node = None
         self.lobby.unpublish()
         self.start_timeout.stop()
         self.stop_timeout.stop()
         self.status_timer.stop()
         self.status_pending = False
-        claim, self.claim = self.claim, None
-        if claim:
-            self.control.release(claim)
+        reservation, self.reservation = self.reservation, None
+        if reservation:
+            self.control.release(reservation.claim)
         if self.config_dir is not None:
             self.config_dir.cleanup()
             self.config_dir = None
@@ -511,6 +473,17 @@ def send_launcher_ready(port: str, token: str) -> None:
         logging.getLogger(__name__).warning("无法向 Launcher 发送就绪信号。")
 
 
+def read_frpc_version(frpc: Path) -> tuple[int, int, int] | None:
+    try:
+        result = subprocess.run(
+            [str(frpc), "--version"], check=True, capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return version_tuple(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--frpc", type=Path)
@@ -527,15 +500,10 @@ def main() -> int:
     app.setApplicationName("MinecraftTools")
     app.setWindowIcon(QIcon(str(resources / "logo.ico")))
     artwork = QPixmap(str(resources / "MinecraftToolsStartupLogo.png"))
-    if options.smoke_test:
-        if artwork.isNull() or not frpc.is_file():
-            return 1
-        if getattr(sys, "frozen", False) and not NODES:
-            return 1
-        result = subprocess.run([str(frpc), "--version"], timeout=10, check=False)
-        if result.returncode:
-            return result.returncode
-    window = MappingWindow(frpc)
+    frpc_version = read_frpc_version(frpc)
+    if options.smoke_test and (artwork.isNull() or frpc_version is None):
+        return 1
+    window = MappingWindow(frpc, frpc_version)
     if options.smoke_test:
         window.show()
 
@@ -560,6 +528,8 @@ def main() -> int:
             splash.finish(window)
 
         QTimer.singleShot(650, show_window)
+    if not options.smoke_test:
+        QTimer.singleShot(0, window.refresh_catalog)
     # Destroy the window while Qt can still process deferred deletion.
     app.aboutToQuit.connect(window.deleteLater)
     return app.exec()
