@@ -118,6 +118,22 @@ kindmitaishere/minecrafttools-frp-agent:2026-11-25-1
 
 当前 Control Server 的文件名校验会拒绝两个 Linux 桌面 `.tar.gz`（本轮实测这两个地址返回 404，安装包本身已上传，可从 GitHub 预发布下载）。若要让这两个压缩包也能从 Phoenix 下载，需先补齐发布文件路由的文件名规则和测试。
 
+### 2026-11-26 节点端口表与删除功能部署
+
+把多段允许端口和节点删除推到 `main` 后，按下面的顺序部署：
+
+| 提交 | 内容 |
+| --- | --- |
+| `a15623f` | 端口范围迁到 `node_port_ranges`、删除 `GET /api/v1/nodes`、节点删除、管理台端口输入 |
+| `860e211` | 忽略本地截图与凭据目录 |
+| `5fd046a` | 修复 Agent 在策略版本未变化时不重新应用 `ranges` |
+
+- 镜像：[Container images 45841515142](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45841515142) 发布 control 与 frp-agent `2026-11-26-8`；[Container images 45844737888](https://github.com/MitaHill/Minecraft-Tools/actions/runs/45844737888) 发布 `2026-11-26-9`（仅 Agent 逻辑变化）。
+- 迁移前把 SQLite 在线备份到 `/data/control-backup-20261126-before-0011.db`，并复制到 Phoenix 的 `/srv/minecrafttools-integration/`。备份和源库的 `PRAGMA integrity_check` 都是 `ok`。
+- Control Server 用 `./deploy.sh 2026-11-26-8 --no-rollback` 部署。迁移到 `0011_node_port_ranges` 后，`hk-dev` 回填为 `33001-33002`，`hk-integration` 回填为 `30001-30002`。
+- 两个节点先升级到 `2026-11-26-8`，发现旧缓存里只有 `start/end`、Agent 因版本未变跳过应用新策略；修复后在香港用 `2026-11-26-9` 重建 `firewall` 和 `agent`。覆盖文件备份为 `images.before-2026-11-26-8.yaml` / `images.before-2026-11-26-9.yaml`。
+- 验收：两个节点均为 `online`，`/data/policy.json` 中出现 `ranges`；`hk-dev` 走 nginx 的 WSS `/api/v1/node/connect`，`hk-integration` 走 `tls://us-6.mitahill.com:19443`；线上注册实际分配到 `33001` 并在释放后返回 204；`/health`、`/admin/`、`node-catalog` 正常，数据库完整性检查通过。
+
 ## 大厅服务和管理工具
 
 原 API 可在 `server/` 安装其 `requirements.txt` 后运行 `python app.py`。管理工具在 `tools/admin/` 安装其依赖后运行 `python admin_gui.py`。虚拟环境同样放在项目外，例如 `./dev.sh uv venv /tmp/minecrafttools-build/server-venv`；套上 `./dev.sh` 时这两个目录也不会产生 `__pycache__`。
