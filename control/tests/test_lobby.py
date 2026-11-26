@@ -444,5 +444,5 @@ class MigrationTests(unittest.TestCase):
                     report = connection.exec_driver_sql(
                         "SELECT report FROM diagnostics"
                     ).scalar_one()
-                self.assertEqual(revision, "0011_node_port_ranges")
+                self.assertEqual(revision, "0012_security_settings")
                 self.assertEqual(json.loads(report), {"stage": "ready"})

@@ -15,6 +15,11 @@ settings = Table(
     Column("lobby_enabled", Boolean, nullable=False),
     Column("blacklist_revision", Integer, nullable=False),
     Column("catalog_updated_at", Integer, nullable=False),
+    Column("auto_ban_enabled", Boolean, nullable=False, server_default="1"),
+    Column("auto_ban_attempts", Integer, nullable=False, server_default="3"),
+    Column("auto_ban_window", Integer, nullable=False, server_default="600"),
+    Column("auto_ban_seconds", Integer, nullable=False, server_default="86400"),
+    Column("auto_ban_skip_legit", Boolean, nullable=False, server_default="1"),
 )
 blacklist = Table(
     "ip_blacklist",
@@ -75,9 +80,6 @@ def live_tunnels(now):
     )
 
 
-UNCLAIMED_BAN_ATTEMPTS = 3
-UNCLAIMED_BAN_WINDOW = 600
-UNCLAIMED_BAN_SECONDS = 86400
 UNCLAIMED_BAN_REASON = "未授权隧道（无有效预约）"
 
 
@@ -91,6 +93,18 @@ def ban_unclaimed_flood(database, address, now):
         return False
     with database.begin() as connection:
         lock_settings(connection)
+        policy = connection.execute(
+            select(
+                settings.c.auto_ban_enabled,
+                settings.c.auto_ban_attempts,
+                settings.c.auto_ban_window,
+                settings.c.auto_ban_seconds,
+                settings.c.auto_ban_skip_legit,
+            )
+        ).mappings().one()
+        if not policy["auto_ban_enabled"]:
+            return False
+        window = policy["auto_ban_window"]
         if connection.execute(
             select(blacklist.c.ip).where(
                 blacklist.c.ip == address, active_blacklist(now)
@@ -101,26 +115,27 @@ def ban_unclaimed_flood(database, address, now):
             select(func.count(blocks.c.id)).where(
                 blocks.c.client_ip == address,
                 blocks.c.source == "unauthorized",
-                blocks.c.created_at >= now - UNCLAIMED_BAN_WINDOW,
+                blocks.c.created_at >= now - window,
             )
         ).scalar_one()
-        if attempts < UNCLAIMED_BAN_ATTEMPTS:
+        if attempts < policy["auto_ban_attempts"]:
             return False
-        legitimate = connection.execute(
-            select(tunnels.c.id).where(
-                tunnels.c.client_ip == address,
-                tunnels.c.install_id.is_not(None),
-                tunnels.c.status != "closed",
-                tunnels.c.created_at >= now - UNCLAIMED_BAN_WINDOW,
-            ).limit(1)
-        ).first()
-        if legitimate is not None:
-            return False
+        if policy["auto_ban_skip_legit"]:
+            legitimate = connection.execute(
+                select(tunnels.c.id).where(
+                    tunnels.c.client_ip == address,
+                    tunnels.c.install_id.is_not(None),
+                    tunnels.c.status != "closed",
+                    tunnels.c.created_at >= now - window,
+                ).limit(1)
+            ).first()
+            if legitimate is not None:
+                return False
         values = {
             "reason": UNCLAIMED_BAN_REASON,
             "actor": "system:unauthorized",
             "created_at": now,
-            "expires_at": now + UNCLAIMED_BAN_SECONDS,
+            "expires_at": now + policy["auto_ban_seconds"],
             "removed_at": None,
         }
         connection.execute(

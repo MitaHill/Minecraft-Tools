@@ -14,7 +14,13 @@ from support import seed_node
 from app.database import audit_logs
 from app.lobby import rooms
 from app.main import app
-from app.moderation import acknowledge_policy, blacklist, ip_block, node_policy
+from app.moderation import (
+    acknowledge_policy,
+    blacklist,
+    ip_block,
+    node_policy,
+    settings,
+)
 from app.node_hub import Hello, NodeHub, ProtocolError
 from app.node_ports import node_port_ranges
 from app.registry import blocks, installs, nodes, tunnel_claims, tunnels
@@ -238,6 +244,64 @@ class AdminTests(unittest.TestCase):
                     select(commands.c.action).order_by(commands.c.id)
                 ).scalars().all(),
                 ["block", "unblock"],
+            )
+
+    def test_security_settings_are_configurable(self):
+        self.assertEqual(self.http.get("/api/admin/settings").status_code, 401)
+        self.assertEqual(self.sign_in("reader").status_code, 200)
+        defaults = {
+            "auto_ban_enabled": True,
+            "auto_ban_attempts": 3,
+            "auto_ban_window_minutes": 10,
+            "auto_ban_hours": 24,
+            "auto_ban_skip_legit": True,
+        }
+        self.assertEqual(self.http.get("/api/admin/settings").json(), defaults)
+        self.assertEqual(
+            self.http.patch("/api/admin/settings", json=defaults).status_code, 403
+        )
+        self.assertEqual(self.sign_in("owner").status_code, 200)
+        for changes in (
+            {"auto_ban_attempts": 0},
+            {"auto_ban_attempts": 21},
+            {"auto_ban_window_minutes": 0},
+            {"auto_ban_window_minutes": 1441},
+            {"auto_ban_hours": 0},
+            {"auto_ban_hours": 721},
+        ):
+            self.assertEqual(
+                self.http.patch(
+                    "/api/admin/settings", json={**defaults, **changes}
+                ).status_code,
+                422,
+                changes,
+            )
+        changed = {
+            "auto_ban_enabled": False,
+            "auto_ban_attempts": 5,
+            "auto_ban_window_minutes": 30,
+            "auto_ban_hours": 48,
+            "auto_ban_skip_legit": False,
+        }
+        self.assertEqual(
+            self.http.patch("/api/admin/settings", json=changed).json(), changed
+        )
+        self.assertEqual(self.http.get("/api/admin/settings").json(), changed)
+        with app.state.database.connect() as connection:
+            row = connection.execute(select(settings)).mappings().one()
+            self.assertEqual(
+                (
+                    bool(row["auto_ban_enabled"]),
+                    row["auto_ban_attempts"],
+                    row["auto_ban_window"],
+                    row["auto_ban_seconds"],
+                    bool(row["auto_ban_skip_legit"]),
+                ),
+                (False, 5, 1800, 172800, False),
+            )
+            self.assertIn(
+                "settings.security",
+                connection.execute(select(audit_logs.c.action)).scalars().all(),
             )
 
     def test_blacklisted_requests_get_a_reason_and_no_catalog(self):

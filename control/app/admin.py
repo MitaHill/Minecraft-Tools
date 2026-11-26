@@ -107,6 +107,14 @@ class LobbyToggle(BaseModel):
     enabled: bool
 
 
+class SecuritySettings(BaseModel):
+    auto_ban_enabled: bool
+    auto_ban_attempts: int = Field(ge=1, le=20, strict=True)
+    auto_ban_window_minutes: int = Field(ge=1, le=1440, strict=True)
+    auto_ban_hours: int = Field(ge=1, le=720, strict=True)
+    auto_ban_skip_legit: bool
+
+
 class NodeConfiguration(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     public_host: str = Field(min_length=1, max_length=253)
@@ -775,3 +783,50 @@ def unlist_room(listing_id: str, request: Request, account: Operator):
                 publication_id=entry.publication_id or "", removed_at=time(),
             ).on_conflict_do_nothing())
             record_admin_action(connection, account.username, "lobby.unlist", listing_id)
+
+
+SECURITY_COLUMNS = (
+    settings.c.auto_ban_enabled,
+    settings.c.auto_ban_attempts,
+    settings.c.auto_ban_window,
+    settings.c.auto_ban_seconds,
+    settings.c.auto_ban_skip_legit,
+)
+
+
+def security_payload(row):
+    return {
+        "auto_ban_enabled": bool(row["auto_ban_enabled"]),
+        "auto_ban_attempts": row["auto_ban_attempts"],
+        "auto_ban_window_minutes": row["auto_ban_window"] // 60,
+        "auto_ban_hours": row["auto_ban_seconds"] // 3600,
+        "auto_ban_skip_legit": bool(row["auto_ban_skip_legit"]),
+    }
+
+
+@router.get("/settings")
+def read_security_settings(request: Request, _account: SignedIn):
+    with request.app.state.database.connect() as connection:
+        row = connection.execute(select(*SECURITY_COLUMNS)).mappings().one()
+    return security_payload(row)
+
+
+@router.patch("/settings", dependencies=[Depends(same_origin)])
+def edit_security_settings(
+    payload: SecuritySettings, request: Request, account: Operator
+):
+    values = {
+        "auto_ban_enabled": payload.auto_ban_enabled,
+        "auto_ban_attempts": payload.auto_ban_attempts,
+        "auto_ban_window": payload.auto_ban_window_minutes * 60,
+        "auto_ban_seconds": payload.auto_ban_hours * 3600,
+        "auto_ban_skip_legit": payload.auto_ban_skip_legit,
+    }
+    with request.app.state.database.begin() as connection:
+        lock_settings(connection)
+        connection.execute(update(settings).values(**values))
+        record_admin_action(
+            connection, account.username, "settings.security", "security"
+        )
+        row = connection.execute(select(*SECURITY_COLUMNS)).mappings().one()
+    return security_payload(row)

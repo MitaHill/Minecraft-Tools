@@ -12,7 +12,7 @@ from support import seed_node
 from app.client_api import digest
 from app.java_probe import Status
 from app.main import app
-from app.moderation import blacklist
+from app.moderation import ban_unclaimed_flood, blacklist, settings
 from app.node_hub import NodeHub, Proxy
 from app.node_ports import node_port_ranges
 from app.registry import blocks, installs, nodes, tunnel_claims, tunnels
@@ -223,6 +223,67 @@ class ClientTunnelTests(unittest.TestCase):
             entry = connection.execute(select(blacklist)).mappings().one()
             self.assertEqual(
                 (entry["ip"], entry["actor"]), ("8.8.8.8", "system:unauthorized")
+            )
+
+    def test_auto_ban_can_be_disabled(self):
+        with self.db.begin() as connection:
+            connection.execute(settings.update().values(auto_ban_enabled=False))
+        node = self.node_row(client_channel="hidden", deployed_ports=[[30001, 30003]])
+        self.hub.record_snapshot(node, [
+            Proxy(
+                run_id="rogue", proxy_name=f"rogue-{port}", remote_port=port,
+                client_ip="8.8.8.8",
+            )
+            for port in (30001, 30002, 30003)
+        ])
+        with self.db.connect() as connection:
+            self.assertEqual(
+                set(connection.execute(select(tunnels.c.status)).scalars()),
+                {"block_pending"},
+            )
+            self.assertEqual(connection.execute(select(blacklist)).all(), [])
+
+    def test_auto_ban_threshold_and_duration_follow_settings(self):
+        with self.db.begin() as connection:
+            connection.execute(settings.update().values(
+                auto_ban_attempts=1, auto_ban_seconds=3600,
+            ))
+        node = self.node_row(client_channel="hidden", deployed_ports=[[30001, 30001]])
+        self.hub.record_snapshot(node, [Proxy(
+            run_id="rogue", proxy_name="rogue", remote_port=30001,
+            client_ip="8.8.8.8",
+        )])
+        with self.db.connect() as connection:
+            entry = connection.execute(select(blacklist)).mappings().one()
+            self.assertEqual(entry["ip"], "8.8.8.8")
+            self.assertEqual(entry["expires_at"] - entry["created_at"], 3600)
+
+    def test_auto_ban_skip_legit_setting(self):
+        now = time()
+        with self.db.begin() as connection:
+            connection.execute(tunnels.insert().values(
+                id="legit", node_id=self.node["id"], run_id="legit",
+                proxy_name="legit", remote_port=30002, status="active",
+                install_id="install", client_ip="8.8.8.8", created_at=now,
+                proxy_present=True,
+            ))
+            connection.execute(blocks.insert(), [
+                {
+                    "tunnel_id": "legit", "node_id": self.node["id"],
+                    "port": 30001 + index, "run_id": "legit",
+                    "proxy_name": "legit", "reason": "fixture",
+                    "source": "unauthorized", "client_ip": "8.8.8.8",
+                    "active": False, "created_at": now,
+                }
+                for index in range(3)
+            ])
+        self.assertFalse(ban_unclaimed_flood(self.db, "8.8.8.8", now))
+        with self.db.begin() as connection:
+            connection.execute(settings.update().values(auto_ban_skip_legit=False))
+        self.assertTrue(ban_unclaimed_flood(self.db, "8.8.8.8", now))
+        with self.db.connect() as connection:
+            self.assertEqual(
+                connection.execute(select(blacklist.c.ip)).scalar_one(), "8.8.8.8"
             )
 
     def test_concurrent_automatic_requests_reserve_distinct_ports_then_exhaust(self):
