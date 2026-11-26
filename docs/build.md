@@ -133,6 +133,7 @@ kindmitaishere/minecrafttools-frp-agent:2026-11-25-1
 - Control Server 用 `./deploy.sh 2026-11-26-8 --no-rollback` 部署。迁移到 `0011_node_port_ranges` 后，`hk-dev` 回填为 `33001-33002`，`hk-integration` 回填为 `30001-30002`。
 - 两个节点先升级到 `2026-11-26-8`，发现旧缓存里只有 `start/end`、Agent 因版本未变跳过应用新策略；修复后在香港用 `2026-11-26-9` 重建 `firewall` 和 `agent`。覆盖文件备份为 `images.before-2026-11-26-8.yaml` / `images.before-2026-11-26-9.yaml`。
 - 验收：两个节点均为 `online`，`/data/policy.json` 中出现 `ranges`；`hk-dev` 走 nginx 的 WSS `/api/v1/node/connect`，`hk-integration` 走 `tls://us-6.mitahill.com:19443`；线上注册实际分配到 `33001` 并在释放后返回 204；`/health`、`/admin/`、`node-catalog` 正常，数据库完整性检查通过。
+- 后续修复：`2026-11-26-10` 调整节点弹窗复选框对齐；`2026-11-26-11` 允许删除在线节点，删除时清理该节点的隧道、封禁、扫描、命令、预留和大厅记录，并断开当前 Agent 会话。Control Server 已升级到 `2026-11-26-11`。
 
 ## 大厅服务和管理工具
 
