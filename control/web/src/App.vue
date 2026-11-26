@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Box } from '@element-plus/icons-vue'
+import avatar from './assets/mitahill-avatar.png'
 import { ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { navigation } from './router'
@@ -25,7 +25,7 @@ async function logout() {
   <div class="console">
     <aside class="sidebar">
       <RouterLink class="brand" :to="{ name: 'overview' }">
-        <span class="brand-mark"><Box aria-hidden="true" /></span>
+        <img class="brand-mark" :src="avatar" alt="" />
         <span class="brand-text">
           <strong>Minecraft Tools</strong>
           <span>Control Server</span>
