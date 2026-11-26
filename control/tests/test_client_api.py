@@ -12,11 +12,17 @@ from support import seed_node
 from app.client_api import digest
 from app.java_probe import Status
 from app.main import app
+from app.moderation import blacklist
 from app.node_hub import NodeHub, Proxy
 from app.node_ports import node_port_ranges
 from app.registry import blocks, installs, nodes, tunnel_claims, tunnels
 from app.scanner import ScanPolicy, record_scan
-from app.tunnel_commands import acknowledge_command, enqueue_command, next_command
+from app.tunnel_commands import (
+    acknowledge_command,
+    commands,
+    enqueue_command,
+    next_command,
+)
 
 
 class ClientTunnelTests(unittest.TestCase):
@@ -81,6 +87,15 @@ class ClientTunnelTests(unittest.TestCase):
         with self.db.begin() as connection:
             connection.execute(nodes.update().where(nodes.c.id == self.node["id"]).values(**values))
 
+    def node_row(self, **changes):
+        if changes:
+            with self.db.begin() as connection:
+                connection.execute(nodes.update().where(nodes.c.id == self.node["id"]).values(**changes))
+        with self.db.connect() as connection:
+            return connection.execute(
+                select(nodes).where(nodes.c.id == self.node["id"])
+            ).mappings().one()
+
     def add_port(self, port):
         with self.db.begin() as connection:
             connection.execute(node_port_ranges.insert().values(
@@ -112,6 +127,83 @@ class ClientTunnelTests(unittest.TestCase):
         self.publish_node(client_channel="hidden")
         self.assertEqual(claim(None, self.owner).status_code, 404)
         self.assertEqual(claim("dev", self.owner).status_code, 404)
+
+    def test_claimed_proxy_is_not_blocked(self):
+        self.publish_node(client_channel="both")
+        created = self.reserve(self.owner)
+        self.assertEqual(created.status_code, 201)
+        claim = created.json()
+        self.hub.record_snapshot(self.node_row(), [Proxy(
+            run_id="run-claimed", proxy_name=claim["proxy_name"],
+            remote_port=claim["remote_port"], claim_id=claim["id"],
+            claim_hash=digest(claim["proof"]), client_ip="8.8.8.8",
+        )])
+        with self.db.connect() as connection:
+            row = connection.execute(select(tunnels)).mappings().one()
+            self.assertIsNotNone(row["install_id"])
+            self.assertEqual(row["status"], "pending")
+            self.assertEqual(connection.execute(select(commands)).all(), [])
+
+    def test_unclaimed_proxy_is_blocked_after_grace(self):
+        node = self.node_row(client_channel="both")
+        proxy = Proxy(
+            run_id="rogue", proxy_name="rogue", remote_port=30001,
+            client_ip="8.8.8.8",
+        )
+        self.hub.record_snapshot(node, [proxy])
+        with self.db.connect() as connection:
+            row = connection.execute(select(tunnels)).mappings().one()
+            self.assertEqual((row["status"], row["install_id"]), ("pending", None))
+            self.assertEqual(connection.execute(select(commands)).all(), [])
+        with self.db.begin() as connection:
+            connection.execute(
+                tunnels.update().where(tunnels.c.id == row["id"])
+                .values(created_at=time() - 31)
+            )
+        self.hub.record_snapshot(node, [proxy])
+        with self.db.connect() as connection:
+            self.assertEqual(
+                connection.execute(select(tunnels.c.status)).scalar_one(),
+                "block_pending",
+            )
+            self.assertEqual(
+                connection.execute(select(commands.c.action)).scalar_one(), "block"
+            )
+            self.assertEqual(
+                connection.execute(select(blocks.c.source)).scalar_one(),
+                "unauthorized",
+            )
+
+    def test_unclaimed_proxy_on_hidden_node_is_blocked_immediately(self):
+        node = self.node_row(client_channel="hidden")
+        self.hub.record_snapshot(node, [Proxy(
+            run_id="rogue", proxy_name="rogue", remote_port=30001,
+            client_ip="8.8.8.8",
+        )])
+        with self.db.connect() as connection:
+            self.assertEqual(
+                connection.execute(select(tunnels.c.status)).scalar_one(),
+                "block_pending",
+            )
+
+    def test_repeated_unclaimed_proxies_ban_public_ip(self):
+        node = self.node_row(client_channel="hidden", deployed_ports=[[30001, 30003]])
+        self.hub.record_snapshot(node, [
+            Proxy(
+                run_id="rogue", proxy_name=f"rogue-{port}", remote_port=port,
+                client_ip="8.8.8.8",
+            )
+            for port in (30001, 30002, 30003)
+        ])
+        with self.db.connect() as connection:
+            self.assertEqual(
+                set(connection.execute(select(tunnels.c.status)).scalars()),
+                {"block_pending"},
+            )
+            entry = connection.execute(select(blacklist)).mappings().one()
+            self.assertEqual(
+                (entry["ip"], entry["actor"]), ("8.8.8.8", "system:unauthorized")
+            )
 
     def test_concurrent_automatic_requests_reserve_distinct_ports_then_exhaust(self):
         self.publish_node(frp_token="fixture-frpc-token")

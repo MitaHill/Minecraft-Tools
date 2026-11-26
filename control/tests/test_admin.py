@@ -192,6 +192,34 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(hidden["nodes"], [])
         self.assertGreater(hidden["updated_at"], renamed["updated_at"])
 
+    def test_hiding_node_blocks_its_live_tunnels(self):
+        self.register_policy_node("a")
+        self.sign_in("owner")
+        with app.state.database.begin() as connection:
+            connection.execute(nodes.update().where(nodes.c.id == "a").values(
+                client_channel="both", server_port=7000,
+            ))
+            connection.execute(insert(tunnels).values(
+                id="t", node_id="a", run_id="run", proxy_name="t",
+                remote_port=30001, status="active", proxy_present=True,
+                client_ip="203.0.113.9",
+            ))
+        payload = {
+            "name": "A", "public_host": "a.example", "allowed_ports": "30001-30004",
+            "client_channel": "hidden", "server_port": 7000,
+        }
+        self.assertEqual(
+            self.http.patch("/api/admin/nodes/a", json=payload).status_code, 200
+        )
+        with app.state.database.connect() as connection:
+            self.assertEqual(
+                connection.execute(select(tunnels.c.status)).scalar_one(),
+                "block_pending",
+            )
+            self.assertEqual(
+                connection.execute(select(commands.c.action)).scalar_one(), "block"
+            )
+
     def test_blacklisted_requests_get_a_reason_and_no_catalog(self):
         with app.state.database.begin() as connection:
             connection.execute(blacklist.insert().values(

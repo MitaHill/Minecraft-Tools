@@ -13,6 +13,7 @@ type Tunnel = {
   remote_port: number
   status: 'pending' | 'active'
   client_ip: string | null
+  install_id: string | null
 }
 type Scan = {
   id: number
@@ -173,7 +174,7 @@ async function rescan(row: Tunnel) {
       <thead><tr><th scope="col">隧道</th><th scope="col">客户端 IP</th><th scope="col">节点</th><th scope="col">远程端口</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
       <tbody>
         <tr v-for="row in rows" :key="row.id">
-          <td>{{ row.proxy_name }}</td><td>{{ row.client_ip || '未知' }}</td><td>{{ row.node_id }}</td>
+          <td>{{ row.proxy_name }}<small v-if="!row.install_id" class="cell-note action-error">未授权</small></td><td>{{ row.client_ip || '未知' }}</td><td>{{ row.node_id }}</td>
           <td>{{ row.remote_port }}</td><td>{{ row.status === 'active' ? '运行中' : '待检测' }}</td>
           <td>
             <div class="resource-actions tunnel-row-actions">

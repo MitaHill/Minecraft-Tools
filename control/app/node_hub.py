@@ -12,7 +12,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, false, func, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -22,19 +22,27 @@ from .moderation import (
     acknowledge_policy,
     active_blacklist,
     active_cidr,
+    ban_unclaimed_flood,
     blacklist,
     lock_settings,
     node_policy,
 )
 from .node_ports import load_ranges
 from .registry import blocks, nodes, tunnel_claims, tunnels
-from .tunnel_commands import acknowledge_command, next_command
+from .tunnel_commands import (
+    CommandConflict,
+    acknowledge_command,
+    enqueue_command,
+    next_command,
+)
 
 logger = logging.getLogger(__name__)
 MAX_MESSAGE_SIZE = 1024 * 1024
 HELLO_TIMEOUT = 10
 HEARTBEAT_TIMEOUT = 30
 HEARTBEAT_WRITE_INTERVAL = 10
+UNCLAIMED_GRACE = 30.0
+UNCLAIMED_BLOCK_REASON = "未授权隧道：没有有效的预约凭证"
 
 
 class ProtocolError(ValueError):
@@ -331,6 +339,7 @@ class NodeHub:
             )
         )
         now = time()
+        unauthorized = []
         with self.database.begin() as connection:
             connection.execute(missing)
             for item in items:
@@ -377,6 +386,9 @@ class NodeHub:
                     & (tunnels.c.status != "closed")
                     & tunnels.c.install_id.is_not_distinct_from(install_id)
                 )
+                same_unclaimed = (
+                    tunnels.c.install_id.is_(None) if install_id is None else false()
+                )
                 statement = statement.on_conflict_do_update(
                     index_elements=[tunnels.c.node_id, tunnels.c.proxy_name],
                     set_={
@@ -401,7 +413,8 @@ class NodeHub:
                             (same_generation, tunnels.c.scan_failures), else_=0
                         ),
                         "created_at": case(
-                            (same_generation, tunnels.c.created_at), else_=now
+                            (same_generation | same_unclaimed, tunnels.c.created_at),
+                            else_=now,
                         ),
                         "next_scan_at": case(
                             (same_generation, tunnels.c.next_scan_at), else_=now
@@ -414,8 +427,16 @@ class NodeHub:
                         ),
                     },
                     where=tunnels.c.status.not_in(["block_pending", "blocked"]),
-                )
-                connection.execute(statement)
+                ).returning(tunnels.c.id, tunnels.c.status, tunnels.c.created_at)
+                row = connection.execute(statement).mappings().one_or_none()
+                if row is not None and install_id is None:
+                    unauthorized.append({
+                        "id": row["id"],
+                        "created_at": row["created_at"],
+                        "run_id": item.run_id,
+                        "port": item.remote_port,
+                        "client_ip": client_ip,
+                    })
                 connection.execute(
                     update(tunnels)
                     .where(
@@ -438,6 +459,27 @@ class NodeHub:
                         blocks.c.proxy_name == item.proxy_name,
                         blocks.c.client_ip.is_(None),
                     ).values(client_ip=client_ip))
+
+        for target in unauthorized:
+            if (
+                node.get("client_channel") != "hidden"
+                and time() - target["created_at"] < UNCLAIMED_GRACE
+            ):
+                continue
+            try:
+                command = enqueue_command(
+                    self.database,
+                    target["id"],
+                    "block",
+                    UNCLAIMED_BLOCK_REASON,
+                    "unauthorized",
+                    expected_run_id=target["run_id"],
+                    expected_port=target["port"],
+                )
+            except CommandConflict:
+                continue
+            if command is not None:
+                ban_unclaimed_flood(self.database, target["client_ip"], time())
 
     async def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         await self.serve(TLSNodeConnection(reader, writer))

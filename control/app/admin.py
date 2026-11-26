@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from asyncio import to_thread
+from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -436,6 +437,7 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
     name, host = payload.name.strip(), payload.public_host
     ranges = parse_spec(payload.allowed_ports)
     client_config = payload.client_config()
+    closing = []
     with request.app.state.database.begin() as connection:
         lock_settings(connection)
         node = connection.execute(select(nodes).where(nodes.c.id == node_id)).mappings().one_or_none()
@@ -476,9 +478,28 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
             replace_ranges(connection, node_id, ranges, pending=True)
             values.update(range_revision=node["range_revision"] + 1, range_error=None)
         connection.execute(update(nodes).where(nodes.c.id == node_id).values(**values))
+        if channel == "hidden" and node["client_channel"] != "hidden":
+            closing = list(connection.execute(
+                select(tunnels.c.id, tunnels.c.run_id, tunnels.c.remote_port).where(
+                    tunnels.c.node_id == node_id,
+                    tunnels.c.proxy_present.is_(True),
+                    tunnels.c.status.in_(("pending", "active")),
+                )
+            ).mappings())
         if channel != node["client_channel"] or (channel != "hidden" and name != node["name"]):
             touch_node_catalog(connection)
         record_admin_action(connection, account.username, "node.edit", node_id)
+    for tunnel in closing:
+        with suppress(CommandConflict):
+            enqueue_command(
+                request.app.state.database,
+                tunnel["id"],
+                "block",
+                "节点已下架，关闭隧道",
+                f"admin:{account.username}",
+                expected_run_id=tunnel["run_id"],
+                expected_port=tunnel["remote_port"],
+            )
     return {"pending": changing_range}
 
 
@@ -510,7 +531,7 @@ def tunnel_snapshot(database):
     query = (
         select(
             tunnels.c.id, tunnels.c.run_id, tunnels.c.created_at, tunnels.c.proxy_name, tunnels.c.status,
-            tunnels.c.node_id, tunnels.c.remote_port, tunnels.c.client_ip,
+            tunnels.c.node_id, tunnels.c.remote_port, tunnels.c.client_ip, tunnels.c.install_id,
         ).join(nodes).where(live_tunnels(time())).order_by(tunnels.c.node_id, tunnels.c.id)
     )
     with database.connect() as connection:

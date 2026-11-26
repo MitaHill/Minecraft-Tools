@@ -117,6 +117,7 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
                 name="Test Node",
                 public_host="node.test",
                 token_hash=sha256(self.secret.encode()).hexdigest(),
+                client_channel="both",
             )
         self.hub = NodeHub(self.db)
         await self.hub.start("127.0.0.1", 0, server_tls(self.cert, self.key))

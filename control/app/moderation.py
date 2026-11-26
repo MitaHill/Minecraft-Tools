@@ -1,10 +1,12 @@
+from ipaddress import ip_address
 from time import time, time_ns
 
 from sqlalchemy import Boolean, Column, Float, Integer, String, Table, func, or_, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .database import metadata
+from .database import metadata, record_admin_action
 from .node_ports import apply_pending, clear_pending, has_pending, requested_ranges
-from .registry import nodes, tunnels
+from .registry import blocks, nodes, tunnels
 
 settings = Table(
     "moderation_settings",
@@ -71,6 +73,69 @@ def live_tunnels(now):
         .where(ip_matches(blacklist.c.ip, tunnels.c.client_ip), active_blacklist(now))
         .exists()
     )
+
+
+UNCLAIMED_BAN_ATTEMPTS = 3
+UNCLAIMED_BAN_WINDOW = 600
+UNCLAIMED_BAN_SECONDS = 86400
+UNCLAIMED_BAN_REASON = "未授权隧道（无有效预约）"
+
+
+def ban_unclaimed_flood(database, address, now):
+    """Ban a public IP that keeps opening tunnels without a valid claim."""
+    try:
+        ip = ip_address(address)
+    except (TypeError, ValueError):
+        return False
+    if not ip.is_global:
+        return False
+    with database.begin() as connection:
+        lock_settings(connection)
+        if connection.execute(
+            select(blacklist.c.ip).where(
+                blacklist.c.ip == address, active_blacklist(now)
+            )
+        ).first():
+            return False
+        attempts = connection.execute(
+            select(func.count(blocks.c.id)).where(
+                blocks.c.client_ip == address,
+                blocks.c.source == "unauthorized",
+                blocks.c.created_at >= now - UNCLAIMED_BAN_WINDOW,
+            )
+        ).scalar_one()
+        if attempts < UNCLAIMED_BAN_ATTEMPTS:
+            return False
+        legitimate = connection.execute(
+            select(tunnels.c.id).where(
+                tunnels.c.client_ip == address,
+                tunnels.c.install_id.is_not(None),
+                tunnels.c.status != "closed",
+                tunnels.c.created_at >= now - UNCLAIMED_BAN_WINDOW,
+            ).limit(1)
+        ).first()
+        if legitimate is not None:
+            return False
+        values = {
+            "reason": UNCLAIMED_BAN_REASON,
+            "actor": "system:unauthorized",
+            "created_at": now,
+            "expires_at": now + UNCLAIMED_BAN_SECONDS,
+            "removed_at": None,
+        }
+        connection.execute(
+            sqlite_insert(blacklist).values(ip=address, **values)
+            .on_conflict_do_update(index_elements=[blacklist.c.ip], set_=values)
+        )
+        connection.execute(
+            update(settings).values(
+                blacklist_revision=settings.c.blacklist_revision + 1
+            )
+        )
+        record_admin_action(
+            connection, "system:unauthorized", "blacklist.auto", address
+        )
+    return True
 
 
 def lock_settings(connection):
