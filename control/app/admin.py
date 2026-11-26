@@ -483,56 +483,27 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
 
 
 @router.delete("/nodes/{node_id}", status_code=204, dependencies=[Depends(same_origin)])
-def delete_node(node_id: str, request: Request, account: SignedIn):
+async def delete_node(node_id: str, request: Request, account: SignedIn):
     if account.role != "superadmin":
         raise HTTPException(403, "Superadmin permission required")
     with request.app.state.database.begin() as connection:
         node = connection.execute(select(nodes).where(nodes.c.id == node_id)).mappings().one_or_none()
         if node is None:
             raise HTTPException(404, "节点不存在")
-        if has_pending(connection, node_id):
-            raise HTTPException(409, "节点正在应用端口范围")
-        if node["status"] == "online":
-            raise HTTPException(409, "节点在线，先停止 Agent")
         tunnel_ids = select(tunnels.c.id).where(tunnels.c.node_id == node_id)
-        live = connection.execute(
-            select(tunnels.c.id)
-            .where(
-                tunnels.c.node_id == node_id,
-                tunnels.c.proxy_present.is_(True) | (tunnels.c.status != "closed"),
-            )
-            .limit(1)
-        ).first()
-        if live is not None:
-            raise HTTPException(409, "该节点仍有实时映射")
-        claimed = connection.execute(
-            select(tunnel_claims.c.id)
-            .where(tunnel_claims.c.node_id == node_id, tunnel_claims.c.expires_at > time())
-            .limit(1)
-        ).first()
-        if claimed is not None:
-            raise HTTPException(409, "该节点仍有未释放的端口预留")
-        blocked = connection.execute(
-            select(blocks.c.id)
-            .where(blocks.c.node_id == node_id, blocks.c.active.is_(True))
-            .limit(1)
-        ).first()
-        if blocked is not None:
-            raise HTTPException(409, "该节点仍有生效中的封禁")
         connection.execute(delete(rooms).where(rooms.c.tunnel_id.in_(tunnel_ids)))
         connection.execute(delete(commands).where(commands.c.node_id == node_id))
         connection.execute(delete(scans).where(scans.c.tunnel_id.in_(tunnel_ids)))
         connection.execute(delete(blocks).where(blocks.c.node_id == node_id))
         connection.execute(delete(tunnel_claims).where(tunnel_claims.c.node_id == node_id))
         connection.execute(delete(tunnels).where(tunnels.c.node_id == node_id))
-        removed = connection.execute(
-            delete(nodes).where(nodes.c.id == node_id, nodes.c.status != "online")
-        )
-        if removed.rowcount != 1:
-            raise HTTPException(409, "节点状态已变化，请重试")
+        connection.execute(delete(nodes).where(nodes.c.id == node_id))
         if node["client_channel"] != "hidden":
             touch_node_catalog(connection)
         record_admin_action(connection, account.username, "node.delete", node_id)
+    hub = request.app.state.node_hub
+    if hub is not None:
+        await hub.disconnect(node_id)
 
 
 def tunnel_snapshot(database):

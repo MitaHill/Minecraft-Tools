@@ -178,6 +178,15 @@ class NodeHub:
             ssl_shutdown_timeout=2,
         )
 
+    async def disconnect(self, node_id: str) -> None:
+        task = self.sessions.get(node_id)
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        self.sessions.pop(node_id, None)
+
     async def close(self):
         if self.server is not None:
             self.server.close()

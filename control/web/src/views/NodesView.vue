@@ -155,7 +155,7 @@ async function remove() {
   <dialog ref="deleteDialog" class="tunnel-dialog" aria-labelledby="delete-title" @cancel="deleteBusy && $event.preventDefault()">
     <form v-if="deleting" class="admin-form" @submit.prevent="remove">
       <h2 id="delete-title">删除节点 {{ deleting.id }}</h2>
-      <p>节点的历史映射、封禁和扫描记录会一并删除，无法恢复。</p>
+      <p>节点的历史映射、封禁和扫描记录会一并删除，无法恢复。在线节点会被立即断开。</p>
       <label class="checkbox-field"><input v-model="deleteConfirmed" type="checkbox" :disabled="deleteBusy">确认删除该节点及其历史记录</label>
       <p v-if="deleteError" class="action-error" role="alert">{{ deleteError }}</p>
       <div class="resource-actions">

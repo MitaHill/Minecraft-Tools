@@ -202,6 +202,16 @@ class NodeHubTests(unittest.IsolatedAsyncioTestCase):
             "frps_version": "0.72.0",
         }
 
+    async def test_disconnect_cancels_a_connected_session(self):
+        async def idle():
+            await asyncio.sleep(30)
+
+        task = asyncio.create_task(idle())
+        self.hub.sessions["test-node"] = task
+        await self.hub.disconnect("test-node")
+        self.assertTrue(task.cancelled())
+        self.assertNotIn("test-node", self.hub.sessions)
+
     def statuses(self):
         with self.db.connect() as connection:
             node_state = connection.execute(select(nodes.c.status)).scalar_one()

@@ -330,39 +330,47 @@ class AdminTests(unittest.TestCase):
         row = self.http.get("/api/admin/nodes").json()["nodes"][0]
         self.assertEqual(row["pending_allowed_ports"], "30001-30004,30006")
 
-    def test_delete_node_guards(self):
+    def test_delete_node_removes_online_nodes_and_their_state(self):
         self.register_policy_node("a")
         self.sign_in("reader")
         self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 403)
         self.sign_in("owner")
-        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 409)
         with app.state.database.begin() as connection:
-            connection.execute(nodes.update().values(status="offline"))
+            connection.execute(insert(installs).values(
+                id="install", token_hash="token", created_at=0, last_seen=0,
+            ))
             connection.execute(insert(tunnels).values(
                 id="t", node_id="a", run_id="run", proxy_name="t",
                 remote_port=30001, status="active",
-            ))
-        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 409)
-        with app.state.database.begin() as connection:
-            connection.execute(tunnels.update().values(proxy_present=False, status="closed"))
-            connection.execute(insert(installs).values(
-                id="install", token_hash="token", created_at=0, last_seen=0,
             ))
             connection.execute(insert(tunnel_claims).values(
                 id="claim", install_id="install", node_id="a", remote_port=30001,
                 proof_hash="proof", expires_at=time() + 60,
             ))
-        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 409)
-        with app.state.database.begin() as connection:
-            connection.execute(tunnel_claims.delete())
-            connection.execute(insert(blocks).values(
+            block_id = connection.execute(insert(blocks).values(
                 tunnel_id="t", node_id="a", port=30001, run_id="run", proxy_name="t",
                 reason="fixture", source="manual", active=True, created_at=0,
+            ).returning(blocks.c.id)).scalar_one()
+            connection.execute(commands.insert().values(
+                block_id=block_id, node_id="a", action="block", status="acked",
+                created_at=0, next_attempt_at=0,
             ))
-        self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 409)
-        with app.state.database.begin() as connection:
-            connection.execute(blocks.update().values(active=False))
+            connection.execute(scans.insert().values(
+                tunnel_id="t", checked_at=0, result="ok",
+            ))
+            connection.execute(rooms.insert().values(
+                full_room_code="30001_1", remote_port=30001, node_id=1, room_name="room",
+                player_count=1, max_players=8, is_public=True, host_player="Player",
+                server_addr="a.example", updated_at=time(), client_ip="203.0.113.10",
+                tunnel_id="t", listing_id="room",
+            ))
         self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 204)
+        with app.state.database.connect() as connection:
+            for table in (
+                nodes, tunnels, scans, blocks, tunnel_claims, commands, rooms,
+                node_port_ranges,
+            ):
+                self.assertEqual(connection.execute(select(table)).all(), [], table.name)
         self.assertEqual(self.http.delete("/api/admin/nodes/a").status_code, 404)
 
     def test_delete_node_cleans_history_and_refreshes_catalog(self):
