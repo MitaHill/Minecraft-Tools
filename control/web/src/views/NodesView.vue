@@ -137,7 +137,7 @@ async function remove() {
         <label>frpc 连接端口<input v-model.number="editing.server_port" type="number" min="1" max="65535" :required="editing.client_channel !== 'hidden'" :disabled="busy"></label>
       </div>
       <label>frpc 登录令牌<input v-model="frpToken" type="password" maxlength="1024" autocomplete="new-password" :placeholder="editing.frp_token_configured ? '留空保留现有令牌' : '可选'" :disabled="busy || clearFrpToken"></label>
-      <label v-if="editing.frp_token_configured"><input v-model="clearFrpToken" type="checkbox" :disabled="busy">清除 frpc 登录令牌</label>
+      <label v-if="editing.frp_token_configured" class="checkbox-field"><input v-model="clearFrpToken" type="checkbox" :disabled="busy">清除 frpc 登录令牌</label>
       <label>允许端口
         <input v-model="editing.allowed_ports" required maxlength="1024" placeholder="30000-30010,31000"
           :disabled="busy || editing.status !== 'online' || !editing.deployed_ports">
@@ -156,7 +156,7 @@ async function remove() {
     <form v-if="deleting" class="admin-form" @submit.prevent="remove">
       <h2 id="delete-title">删除节点 {{ deleting.id }}</h2>
       <p>节点的历史映射、封禁和扫描记录会一并删除，无法恢复。</p>
-      <label><input v-model="deleteConfirmed" type="checkbox" :disabled="deleteBusy">确认删除该节点及其历史记录</label>
+      <label class="checkbox-field"><input v-model="deleteConfirmed" type="checkbox" :disabled="deleteBusy">确认删除该节点及其历史记录</label>
       <p v-if="deleteError" class="action-error" role="alert">{{ deleteError }}</p>
       <div class="resource-actions">
         <button class="console-button" type="button" :disabled="deleteBusy" @click="deleteDialog?.close()">取消</button>
@@ -165,3 +165,15 @@ async function remove() {
     </form>
   </dialog>
 </template>
+
+<style scoped>
+.admin-form label.checkbox-field {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-form label.checkbox-field input {
+  width: auto;
+}
+</style>
