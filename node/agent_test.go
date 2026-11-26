@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func callPlugin(t *testing.T, agent *Agent, operation, payload string) bool {
@@ -136,5 +137,35 @@ func TestManagedProxyKeepsOnlyProofDigestAndRetainsClosedGeneration(t *testing.T
 		ClaimHash: fmt.Sprintf("%x", sha256.Sum256([]byte(proof))), Closed: true}
 	if registered != want {
 		t.Fatalf("unexpected saved generation: %#v", registered)
+	}
+}
+
+func TestLoginBlacklistExpiresAndNormalizesAddress(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxies.json")
+	agent, err := openAgent(path, 30001, 30002)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := float64(time.Now().Add(-time.Minute).Unix())
+	agent.policy.Blacklist = &blacklistPolicy{Entries: []ipBan{
+		{IP: "192.0.2.8", Reason: "blocked"},
+		{IP: "2001:db8::8", Reason: "expired", ExpiresAt: &expired},
+	}}
+	if !callPlugin(t, agent, "Login", `{"content":{"client_address":"[::ffff:192.0.2.8]:23456"}}`) {
+		t.Fatal("blacklisted IPv4 address was accepted as an IPv4-mapped IPv6 address")
+	}
+	if callPlugin(t, agent, "Login", `{"content":{"client_address":"[2001:db8::8]:23456"}}`) {
+		t.Fatal("expired blacklist entry still rejects login")
+	}
+}
+
+func TestAllowedPortsIntersectAndPreserveGaps(t *testing.T) {
+	ports, err := allowedPorts(30001, 30010, "30000-30002,30003,30008-30015")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inDeployedRange(ports, 30001, 30003) || !inDeployedRange(ports, 30008, 30010) ||
+		inDeployedRange(ports, 30003, 30008) || inDeployedRange(ports, 30000, 30002) {
+		t.Fatalf("incorrect deployed ranges: %v", ports)
 	}
 }

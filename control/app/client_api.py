@@ -9,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, select, update
 
+from .moderation import canonical_ip, ip_block, lock_settings
 from .registry import blocks, installs, nodes, tunnel_claims, tunnels
 
 router = APIRouter(prefix="/api/v1")
@@ -48,6 +49,26 @@ def current_install(
 Install = Annotated[str, Depends(current_install)]
 
 
+@router.get("/nodes")
+def list_public_nodes(request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    with request.app.state.database.connect() as connection:
+        rows = connection.execute(select(
+            nodes.c.id, nodes.c.name, nodes.c.public_host, nodes.c.port_start,
+            nodes.c.port_end, nodes.c.status,
+        )).mappings()
+        return {"nodes": [dict(row) for row in rows]}
+
+
+def request_ip(request):
+    return canonical_ip(request.client.host) if request.client else None
+
+
+def reject_blacklisted(connection, request):
+    if reason := ip_block(connection, request_ip(request)):
+        raise HTTPException(403, {"code": "ip_blacklisted", "reason": reason})
+
+
 @router.post("/installs/register", status_code=201)
 def register_install(request: Request, response: Response):
     request.app.state.install_rate_limit.check(
@@ -56,6 +77,9 @@ def register_install(request: Request, response: Response):
     install_id, token = uuid4().hex, token_urlsafe(32)
     now = time()
     with request.app.state.database.begin() as connection:
+        # Serialize install enrollment with a blacklist update.
+        lock_settings(connection)
+        reject_blacklisted(connection, request)
         connection.execute(
             installs.insert().values(
                 id=install_id,
@@ -84,13 +108,16 @@ def register_tunnel(
         connection.execute(
             update(installs).where(installs.c.id == install_id).values(last_seen=now)
         )
+        reject_blacklisted(connection, request)
         node = connection.execute(
-            select(nodes.c.port_start, nodes.c.port_end, nodes.c.status).where(
+            select(nodes.c.port_start, nodes.c.port_end, nodes.c.status, nodes.c.pending_port_start).where(
                 nodes.c.id == node_id
             )
         ).one_or_none()
         if node is None:
             raise HTTPException(404, "Node not found")
+        if node.pending_port_start is not None:
+            raise HTTPException(409, {"code": "node_range_pending"})
         if not node.port_start <= port <= node.port_end:
             raise HTTPException(422, "Port outside the node range")
         if node.status != "online":
@@ -141,7 +168,7 @@ def register_tunnel(
     return {"id": claim_id, "proxy_name": f"minecraft-{claim_id}", "proof": proof}
 
 
-def claim_status(connection, claim_id: str, install_id: str, now: float):
+def claim_status(connection, claim_id: str, install_id: str, now: float, client_ip=None):
     association = and_(
         tunnels.c.node_id == tunnel_claims.c.node_id,
         tunnels.c.proxy_name == f"minecraft-{claim_id}",
@@ -156,6 +183,7 @@ def claim_status(connection, claim_id: str, install_id: str, now: float):
                 tunnels.c.block_reason,
                 tunnels.c.blocked_at,
                 tunnels.c.last_scan_at,
+                tunnels.c.client_ip,
             )
             .select_from(tunnel_claims.outerjoin(tunnels, association))
             .where(
@@ -169,6 +197,9 @@ def claim_status(connection, claim_id: str, install_id: str, now: float):
     )
     if row is None:
         raise HTTPException(404, "Tunnel registration not found")
+    if reason := ip_block(connection, row["client_ip"], client_ip):
+        return {"status": "blocked", "reason": reason, "code": "ip_blacklisted",
+                "blocked_at": row["blocked_at"], "last_scan_at": row["last_scan_at"]}
     return {
         "status": row["status"]
         or ("closed" if row["bound_at"] is not None else "pending"),
@@ -184,7 +215,7 @@ def read_status(
 ):
     response.headers["Cache-Control"] = "no-store"
     with request.app.state.database.connect() as connection:
-        return claim_status(connection, claim_id, install_id, time())
+        return claim_status(connection, claim_id, install_id, time(), request_ip(request))
 
 
 @router.post("/tunnels/{claim_id}/heartbeat")
@@ -202,7 +233,7 @@ def renew_tunnel(
             )
             .values(expires_at=now + CLAIM_SECONDS)
         )
-        result = claim_status(connection, claim_id, install_id, now)
+        result = claim_status(connection, claim_id, install_id, now, request_ip(request))
         connection.execute(
             update(installs).where(installs.c.id == install_id).values(last_seen=now)
         )

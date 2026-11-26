@@ -48,6 +48,7 @@ def enqueue_command(
     expected_run_id: str | None = None,
     expected_port: int | None = None,
     expected_scan_at: float | None = None,
+    expected_created_at: float | None = None,
 ) -> dict | None:
     now = time()
     with database.begin() as connection:
@@ -66,6 +67,10 @@ def enqueue_command(
             return None
         if expected_run_id is not None and tunnel["run_id"] != expected_run_id:
             raise CommandConflict("Tunnel generation changed")
+        if expected_created_at is not None and (
+            tunnel["created_at"] != expected_created_at or not tunnel["proxy_present"]
+        ):
+            raise CommandConflict("隧道已变化，请刷新后重试")
         if expected_port is not None and tunnel["remote_port"] != expected_port:
             raise CommandConflict("Tunnel port changed")
         if expected_scan_at is not None and tunnel["last_scan_at"] != expected_scan_at:
@@ -119,6 +124,7 @@ def enqueue_command(
                     proxy_name=tunnel["proxy_name"],
                     reason=reason,
                     source=source,
+                    client_ip=tunnel["client_ip"],
                     active=True,
                     created_at=now,
                 )

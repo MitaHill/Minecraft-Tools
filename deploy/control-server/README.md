@@ -22,6 +22,12 @@ GitHub Actions 只构建并推送镜像，不连接服务器。部署按本文�
 
 端口：`18765` 只监听 `127.0.0.1`，由宿主机 nginx 终止 TLS 后代理；`19443` 是节点 Hub。
 
+## 管理台 WebSocket
+
+在 Phoenix 的同一 HTTPS 虚拟主机里，将 `/api/admin/tunnels/live` 加到现有节点入口使用的 WebSocket 代理配置。保留请求的 `Host` 和 `Origin`，由可信 nginx 转发 `X-Forwarded-Proto: https`。代理到 Control Server 时使用 HTTP/1.1，并转发 `Upgrade` 和 `Connection`。同时确认 Control Server 的 `CONTROL_TRUSTED_PROXIES` 覆盖 nginx 实际使用的代理地址。
+
+在隔离环境确认管理台握手后，按 Control Server、节点 Agent 与 firewall-helper、Qt 客户端的顺序滚动更新。新版 Agent 上线后在节点页会显示部署范围。黑名单页会显示尚未确认规则的节点。
+
 ## 发布
 
 前提：镜像已经在 Docker Hub 上，标签是 `yyyy-mm-dd-n`（`.github/workflows/images.yml` 的 publish 任务）。

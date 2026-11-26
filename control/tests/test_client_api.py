@@ -183,7 +183,7 @@ class ClientTunnelTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             (response.json()["status"], response.json()["reason"]),
-            ("block_pending", "测试"),
+            ("block_pending", "未检测到 Minecraft Java 响应"),
         )
 
     def test_expired_claim_can_be_replaced_but_cannot_be_renewed(self):

@@ -1,4 +1,5 @@
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     Float,
@@ -24,6 +25,13 @@ nodes = Table(
     Column("status", String, nullable=False, server_default="offline"),
     Column("last_seen", Float),
     Column("token_hash", String, nullable=False),
+    Column("deployed_ports", JSON(none_as_null=True)),
+    Column("pending_port_start", Integer),
+    Column("pending_port_end", Integer),
+    Column("range_revision", Integer, nullable=False, server_default="0"),
+    Column("range_error", String),
+    Column("blacklist_revision", Integer),
+    Column("blacklist_error", String),
 )
 
 tunnels = Table(
@@ -35,6 +43,7 @@ tunnels = Table(
     Column("proxy_name", String, nullable=False),
     Column("remote_port", Integer, nullable=False),
     Column("remote_addr", String),
+    Column("client_ip", String),
     Column("local_ip", String),
     Column("local_port", Integer),
     Column("install_id", String),
@@ -61,6 +70,7 @@ blocks = Table(
     Column("proxy_name", String, nullable=False),
     Column("reason", String, nullable=False),
     Column("source", String, nullable=False),
+    Column("client_ip", String),
     Column("active", Boolean, nullable=False),
     Column("created_at", Float, nullable=False),
     Column("removed_at", Float),

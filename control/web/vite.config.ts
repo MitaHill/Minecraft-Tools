@@ -15,7 +15,7 @@ export default defineConfig(({ mode }) => {
       host: '127.0.0.1',
       proxy: {
         '/health': CONTROL_API_TARGET,
-        '/api/admin': CONTROL_API_TARGET,
+        '/api/admin': { target: CONTROL_API_TARGET, ws: true },
       },
     },
   }

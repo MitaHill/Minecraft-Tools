@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { navigation } from '../router'
 import { signIn } from '../session'
 
 const route = useRoute()
@@ -17,7 +18,7 @@ async function submit() {
   try {
     await signIn(username.value, password.value)
     const destination = route.query.next
-    await router.replace(typeof destination === 'string' && ['nodes', 'tunnels'].includes(destination)
+    await router.replace(typeof destination === 'string' && navigation.some(item => item.name === destination)
       ? { name: destination }
       : { name: 'overview' })
   } catch (reason) {

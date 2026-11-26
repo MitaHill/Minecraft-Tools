@@ -17,8 +17,11 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import URL, create_engine
 
-from app.lobby import cleanup
+from app.admin import Account, current_account
+from app.java_probe import Status
+from app.lobby import cleanup, rooms
 from app.main import app
+from app.node_hub import NodeHub, Proxy
 from app.registry import nodes, tunnels
 from app.tunnel_commands import acknowledge_command, enqueue_command, next_command
 
@@ -153,6 +156,70 @@ class LobbyTests(unittest.TestCase):
         response = self.http.post("/api/lobby/rooms", json=duplicate)
         self.assertIs(response.json()["success"], False)
 
+    def test_managed_publication_uses_live_claim_and_registered_probe_target(self):
+        database = app.state.database
+        with database.begin() as connection:
+            connection.execute(nodes.insert().values(
+                id="a", name="Lab", public_host="127.0.0.1", status="online",
+                port_start=self.port, port_end=self.port, token_hash="fixture",
+            ))
+        credentials = self.http.post("/api/v1/installs/register").json()
+        headers = {"Authorization": "Bearer " + credentials["token"]}
+        claim = self.http.post("/api/v1/tunnels/register", headers=headers, json={
+            "node_id": "a", "remote_port": self.port,
+        }).json()
+        room = {**self.room, "publication_id": "a" * 32, "claim_id": claim["id"]}
+        denied = self.http.post("/api/v1/lobby/rooms", headers=headers, json=room)
+        self.assertEqual(denied.json()["code"], "tunnel_unavailable")
+        NodeHub(database).record_current_snapshot("a", [Proxy(
+            run_id="controlled-run", proxy_name=claim["proxy_name"], remote_port=self.port,
+            client_ip="192.0.2.8", claim_id=claim["id"],
+            claim_hash=sha256(claim["proof"].encode()).hexdigest(),
+        )])
+        other = self.http.post("/api/v1/installs/register").json()
+        denied = self.http.post("/api/v1/lobby/rooms", json=room, headers={
+            "Authorization": "Bearer " + other["token"],
+        })
+        self.assertEqual(denied.json()["code"], "tunnel_unavailable")
+        with (
+            patch.object(app.state, "lobby_settings", replace(app.state.lobby_settings, targets=frozenset())),
+            patch("app.lobby.probe", return_value=Status("ok", version="1.21", motd="Controlled")) as probe,
+        ):
+            result = self.http.post("/api/v1/lobby/rooms", json=room, headers=headers)
+        self.assertTrue(result.json()["success"])
+        probe.assert_awaited_once_with("127.0.0.1", self.port)
+        self.assertIsNotNone(self.list_rooms()[0]["tunnel_id"])
+
+    def test_admin_lobby_toggle_and_publication_removal(self):
+        app.dependency_overrides[current_account] = lambda: Account(
+            username="op", role="operator", password_hash="fixture"
+        )
+        self.addCleanup(app.dependency_overrides.pop, current_account)
+        room = {**self.room, "publication_id": "a" * 32}
+        def post(data):
+            return self.http.post("/api/v1/lobby/rooms", json=data).json()
+
+        self.assertTrue(post(room)["success"])
+        (first,) = self.http.get("/api/admin/lobby/rooms").json()["rooms"]
+
+        self.assertEqual(self.http.patch("/api/admin/lobby", json={"enabled": False}).status_code, 200)
+        self.assertEqual(self.list_rooms(), [])
+        self.assertFalse(post(room)["enabled"])
+        self.assertEqual(post({**room, "publication_id": "b" * 32})["code"], "lobby_closed")
+        self.assertEqual(self.http.get("/api/admin/lobby/rooms").json()["rooms"][0]["listing_id"], first["listing_id"])
+        self.assertEqual(self.http.patch("/api/admin/lobby", json={"enabled": True}).status_code, 200)
+        self.assertEqual(len(self.list_rooms()), 1)
+        self.assertEqual(self.http.delete("/api/admin/lobby/rooms/" + first["listing_id"]).status_code, 204)
+        self.assertEqual(post(room)["code"], "room_unlisted")
+        self.assertEqual(self.list_rooms(), [])
+
+        self.assertTrue(post({**room, "publication_id": "b" * 32})["success"])
+        self.assertEqual(self.http.delete("/api/admin/lobby/rooms/" + first["listing_id"]).status_code, 204)
+        self.assertEqual(len(self.list_rooms()), 1)
+        with app.state.database.begin() as connection:
+            connection.execute(rooms.update().values(updated_at=time() - 30))
+        self.assertEqual(self.list_rooms(), [])
+
     def test_block_pending_unlists_and_refuses_renewal_before_firewall_ack(self):
         database = app.state.database
         with database.begin() as connection:
@@ -164,6 +231,7 @@ class LobbyTests(unittest.TestCase):
                     port_start=self.port,
                     port_end=self.port,
                     token_hash="test-token-hash",
+                    status="online",
                 )
             )
             connection.execute(
@@ -299,19 +367,29 @@ class MigrationTests(unittest.TestCase):
                 "INSERT INTO diagnostics (os, arch, report) VALUES (?, ?, ?)",
                 ("darwin", "arm64", '{"stage":"ready"}'),
             )
+            command.upgrade(migration, "0007_admin_audit")
+            connection.exec_driver_sql(
+                """INSERT INTO rooms (
+                    full_room_code, remote_port, node_id, room_name, player_count, max_players,
+                    is_public, host_player, server_addr, updated_at, client_ip
+                ) VALUES ('30001_1', 30001, 1, 'Previous room', 1, 10, 1, 'Player',
+                          'node.example', ?, '192.0.2.8')""",
+                (time(),),
+            )
         self.enterContext(patch.dict("os.environ", {"CONTROL_DATA_DIR": str(home)}))
         for _ in range(2):
             with TestClient(app) as http:
                 self.assertEqual(http.get("/health").json(), {"status": "ok"})
-                self.assertEqual(
-                    http.get("/api/lobby/rooms").json(), {"success": True, "rooms": []}
-                )
+                public = http.get("/api/lobby/rooms").json()
+                self.assertEqual(public["rooms"][0]["room_name"], "Previous room")
                 with engine.connect() as connection:
+                    listing = connection.exec_driver_sql("SELECT listing_id FROM rooms").scalar_one()
+                    self.assertEqual(len(listing), 32)
                     revision = connection.exec_driver_sql(
                         "SELECT version_num FROM alembic_version"
                     ).scalar_one()
                     report = connection.exec_driver_sql(
                         "SELECT report FROM diagnostics"
                     ).scalar_one()
-                self.assertEqual(revision, "0007_admin_audit")
+                self.assertEqual(revision, "0008_moderation")
                 self.assertEqual(json.loads(report), {"stage": "ready"})

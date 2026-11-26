@@ -53,3 +53,18 @@ class LobbyPresenceTests(unittest.TestCase):
         self.assertEqual(
             lobby.announcement, "房间发布失败，请确认游戏服务器可从公网访问。"
         )
+
+    def test_admin_removal_stops_renewal_and_manual_publish_gets_new_id(self):
+        lobby = LobbyTab()
+        self.addCleanup(lobby.close)
+        lobby.request = Mock()
+        room = {"node_id": 1, "remote_port": 30001, "full_room_code": "30001_1"}
+        lobby.publish(room)
+        first = lobby.request.call_args.args
+        first[2]({"success": False, "code": "room_unlisted"})
+        self.assertIsNone(lobby.active_room)
+        self.assertFalse(lobby.heartbeat.isActive())
+        lobby.sync_publication()
+        self.assertEqual(lobby.request.call_count, 1)
+        lobby.publish(room)
+        self.assertNotEqual(first[3]["publication_id"], lobby.request.call_args.args[3]["publication_id"])

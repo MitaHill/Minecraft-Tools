@@ -5,7 +5,9 @@ import random
 import socket
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime
+from ipaddress import IPv6Address
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
@@ -72,6 +74,10 @@ class MappingWindow(QWidget):
         self.registering = False
         self.closing = False
         self.claim: TunnelClaim | None = None
+        self.publication_removed = False
+        self.running_node: Node | None = None
+        self.updated_nodes: dict[str, Node] = {}
+        self.node_request = 0
         self.status_pending = False
         self.renew_at = 0.0
         self.control = TunnelControl(self, control_base())
@@ -99,7 +105,7 @@ class MappingWindow(QWidget):
         self.remote_port = QSpinBox()
         self.remote_port.setRange(1, 65535)
         self.remote_port.setValue(random.randint(10000, 65534))
-        self.node.currentIndexChanged.connect(self.update_remote_ports)
+        self.node.currentIndexChanged.connect(self.refresh_node)
         self.start_button = QPushButton("启动映射")
         self.start_button.setEnabled(bool(nodes))
         self.start_button.clicked.connect(self.toggle_mapping)
@@ -116,8 +122,9 @@ class MappingWindow(QWidget):
         self.mapping_log.setReadOnly(True)
         self.mapping_log.setMaximumBlockCount(80)
         self.tabs = QTabWidget()
-        self.lobby = LobbyTab(self.control.base)
+        self.lobby = LobbyTab(self.control.base, lambda: self.control.token)
         self.lobby.publication_status.connect(self.append_log)
+        self.lobby.publication_removed.connect(self.room_was_removed)
         self.tabs.addTab(self.mapping_page(), "映射")
         self.tabs.addTab(self.lobby, "联机大厅")
         self.tabs.addTab(self.settings_page(), "设置")
@@ -166,6 +173,10 @@ class MappingWindow(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.copy_button)
+        self.republish = QPushButton("重新发布房间")
+        self.republish.clicked.connect(self.publish_room)
+        self.republish.hide()
+        buttons.addWidget(self.republish)
         layout.addLayout(buttons)
         layout.addWidget(QLabel("运行日志:"))
         layout.addWidget(self.mapping_log, 1)
@@ -214,15 +225,56 @@ class MappingWindow(QWidget):
             self.status.setText(message)
             self.append_log(message)
 
-    def update_remote_ports(self):
-        node = self.node.currentData()
-        if node is None:
-            return
+    def update_remote_ports(self, node: Node):
         start, end = node.port_range
         previous = self.remote_port.value()
         self.remote_port.setRange(start, end)
         if not start <= previous <= end:
             self.remote_port.setValue(random.randint(start, end))
+
+    @staticmethod
+    def configured_node(node, code, data):
+        if code == 404:
+            return node  # Older Control Server versions lack the node directory.
+        entries = data.get("nodes")
+        if code != 200 or not isinstance(entries, list):
+            return None
+        for row in entries:
+            if not isinstance(row, dict) or row.get("id") != node.node_id:
+                continue
+            start, end, host = row.get("port_start"), row.get("port_end"), row.get("public_host")
+            if (
+                type(start) is int and type(end) is int and 1024 <= start <= end <= 65535
+                and isinstance(host, str) and host
+                and not any(char.isspace() or char in "[]/\\?#@" for char in host)
+            ):
+                if ":" in host:
+                    try:
+                        IPv6Address(host)
+                    except ValueError:
+                        return None
+                return replace(node, public_host=host, remote_port_start=start, remote_port_end=end)
+            break
+        return None
+
+    def refresh_node(self):
+        self.node_request += 1
+        request = self.node_request
+        node = self.node.currentData()
+        if node is None:
+            return
+        self.update_remote_ports(self.updated_nodes.get(node.node_id, node))
+        if not (node.node_id and self.control.base):
+            return
+
+        def received(code, data):
+            if request != self.node_request or self.registering or self.closing:
+                return
+            if updated := self.configured_node(node, code, data):
+                self.updated_nodes[node.node_id] = updated
+                self.update_remote_ports(updated)
+
+        self.control.nodes(received)
 
     def toggle_mapping(self):
         if self.registering or self.stopping or self.closing:
@@ -238,6 +290,7 @@ class MappingWindow(QWidget):
             return
 
         self.failure = ""
+        self.publication_removed = False
         if node.node_id:
             if not self.control.base:
                 self.set_status("受控节点需要可用的 Control Server，请通过 Launcher 启动。")
@@ -245,9 +298,28 @@ class MappingWindow(QWidget):
             self.registering = True
             self.set_mapping_controls(True)
             self.start_button.setEnabled(False)
-            self.set_status("正在注册隧道…")
-            self.control.reserve(node.node_id, self.remote_port.value(),
-                                 lambda claim, error: self.start_registered(node, claim, error))
+            port = self.remote_port.value()
+            self.set_status("正在同步节点配置…")
+
+            def reserve(code, data):
+                if self.closing:
+                    self.registering = False
+                    return
+                updated = self.configured_node(node, code, data)
+                if updated is None:
+                    self.start_registered(node, None, "无法读取节点当前的端口范围。")
+                    return
+                self.updated_nodes[node.node_id] = updated
+                self.update_remote_ports(updated)
+                start, end = updated.port_range
+                if not start <= port <= end:
+                    self.start_registered(updated, None, "节点端口范围已更新，请选择新的远程端口。")
+                    return
+                self.set_status("正在注册隧道…")
+                self.control.reserve(updated.node_id, port, lambda claim, error:
+                                     self.start_registered(updated, claim, error))
+
+            self.control.nodes(reserve)
             return
         self.start_mapping(node)
 
@@ -279,6 +351,7 @@ class MappingWindow(QWidget):
             return
 
         self.output.clear()
+        self.running_node = node
         self.address = node.address(self.remote_port.value())
         self.set_mapping_controls(True)
         self.set_status("正在连接节点…")
@@ -304,7 +377,11 @@ class MappingWindow(QWidget):
             if code == 200 and renew:
                 self.renew_at = monotonic() + 25
             if code == 200 and payload.get("status") in ("block_pending", "blocked"):
-                self.failure = blocked_message(payload.get("reason"))
+                reason = payload.get("reason")
+                if payload.get("code") == "ip_blacklisted":
+                    self.failure = f"客户端 IP 已被拉黑。{reason or ''}"
+                else:
+                    self.failure = blocked_message(reason)
             elif code in (401, 404):
                 self.failure = "隧道注册已失效，请重新启动映射。"
             else:
@@ -320,6 +397,7 @@ class MappingWindow(QWidget):
         self.start_button.setText("停止映射" if running else "启动映射")
         self.start_button.setEnabled(self.node.count() > 0)
         if not running:
+            self.republish.hide()
             self.link.clear()
             self.copy_button.setEnabled(False)
 
@@ -335,15 +413,8 @@ class MappingWindow(QWidget):
                 self.link.setText(self.address)
                 self.copy_button.setEnabled(True)
                 self.set_status("映射运行中。")
-                if self.public_room.isChecked() and self.lobby.active_room is None:
-                    node = self.node.currentData()
-                    self.lobby.publish(room_payload(
-                        node.public_host or node.server_addr,
-                        self.remote_port.value(),
-                        self.room_name.text().strip(),
-                        self.room_description.text().strip(),
-                        self.room_players.value(),
-                    ))
+                if not self.publication_removed:
+                    self.publish_room()
             elif b"start error" in line or b"login to server failed" in line:
                 self.failure = "映射失败，请检查节点、认证信息和远程端口。"
                 self.stop_mapping()
@@ -355,6 +426,27 @@ class MappingWindow(QWidget):
                 self.start_timeout.start(20_000)
         if len(self.output) > 16384:
             del self.output[:-4096]
+
+    def room_was_removed(self):
+        self.publication_removed = True
+        self.republish.show()
+
+    def publish_room(self):
+        node = self.running_node
+        if not node or not self.public_room.isChecked() or self.lobby.active_room is not None:
+            return
+        self.publication_removed = False
+        self.republish.hide()
+        room = room_payload(
+            node.public_host or node.server_addr,
+            self.remote_port.value(),
+            self.room_name.text().strip(),
+            self.room_description.text().strip(),
+            self.room_players.value(),
+        )
+        if self.claim and self.lobby.control_lobby:
+            room["claim_id"] = self.claim.id
+        self.lobby.publish(room)
 
     def mapping_timed_out(self):
         self.failure = "连接超时，请检查节点地址和网络。"
@@ -378,6 +470,7 @@ class MappingWindow(QWidget):
             self.mapping_finished()
 
     def mapping_finished(self, exit_code=0):
+        self.running_node = None
         self.lobby.unpublish()
         self.start_timeout.stop()
         self.stop_timeout.stop()

@@ -31,7 +31,7 @@ MAX_PER_NODE = 4
 MAX_PER_ROUND = 16
 KEEP_SCANS_PER_TUNNEL = 32
 # 返回给客户端展示的封禁文案；后续按触发条件补充各自的文案。
-AUTO_BLOCK_MESSAGE = "测试"
+AUTO_BLOCK_MESSAGE = "未检测到 Minecraft Java 响应"
 
 scans = Table(
     "tunnel_scans",

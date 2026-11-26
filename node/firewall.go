@@ -27,6 +27,7 @@ type FirewallRequest struct {
 	CommandID int64  `json:"command_id,omitempty"`
 	RunID     string `json:"run_id,omitempty"`
 	ProxyName string `json:"proxy_name,omitempty"`
+	ClientIP  string `json:"client_ip,omitempty"`
 }
 
 type FirewallReply struct {
@@ -197,11 +198,14 @@ func verifyFirewall(ctx context.Context, desired []int) error {
 }
 
 func closePortConnections(ctx context.Context, port int) error {
-	filter := fmt.Sprintf("sport = :%d", port)
-	if _, err := runNetworkTool(ctx, "", "ss", "-HKnt", "state", "connected", filter); err != nil {
+	return closeConnections(ctx, "connected", fmt.Sprintf("sport = :%d", port))
+}
+
+func closeConnections(ctx context.Context, state, filter string) error {
+	if _, err := runNetworkTool(ctx, "", "ss", "-HKnt", "state", state, filter); err != nil {
 		return err
 	}
-	output, err := runNetworkTool(ctx, "", "ss", "-Hnt", "state", "connected", filter)
+	output, err := runNetworkTool(ctx, "", "ss", "-Hnt", "state", state, filter)
 	if err != nil {
 		return err
 	}
@@ -234,6 +238,17 @@ func verifySocketDestroy(ctx context.Context) error {
 func (firewall *Firewall) handle(ctx context.Context, request FirewallRequest) (FirewallReply, error) {
 	firewall.mu.Lock()
 	defer firewall.mu.Unlock()
+	if request.Action == "disconnect-client" {
+		ip := normalizedIP(request.ClientIP)
+		if ip == "" {
+			return FirewallReply{}, errors.New("invalid FRP client IP")
+		}
+		// Docker publishes the frps control listener on port 7000 inside node-net.
+		if err := closeConnections(ctx, "established", "sport = :7000 and dst "+ip); err != nil {
+			return FirewallReply{}, err
+		}
+		return FirewallReply{OK: true}, nil
+	}
 	if request.Action == "ready" {
 		if !firewall.healthy {
 			return FirewallReply{}, errors.New("firewall is reconciling")

@@ -2,15 +2,18 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import time
 from unittest.mock import patch
 
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select
+from starlette.websockets import WebSocketDisconnect
 
 from app.database import audit_logs
 from app.main import app
-from app.registry import tunnels
+from app.moderation import acknowledge_policy, blacklist, node_policy
+from app.registry import nodes, tunnels
 from app.scanner import scans
 
 
@@ -161,3 +164,77 @@ class AdminTests(unittest.TestCase):
                 self.http.post("/api/admin/session", json=payload).status_code, 401
             )
         self.assertEqual(self.sign_in("reader").status_code, 429)
+
+    def register_policy_node(self, node_id):
+        with app.state.database.begin() as connection:
+            connection.execute(insert(nodes).values(
+                id=node_id, name=node_id, public_host=f"{node_id}.example",
+                port_start=30001, port_end=30004, token_hash="fixture",
+                status="online", deployed_ports=[[30001, 30008]], blacklist_revision=0,
+            ))
+
+    def test_live_websocket_origin_reconnect_state_and_ip_blacklist(self):
+        self.sign_in("owner")
+        for node in ("a", "b"):
+            self.register_policy_node(node)
+        url = "wss://control.test/api/admin/tunnels/live"
+        with (
+            self.assertRaises(WebSocketDisconnect),
+            self.http.websocket_connect(url, headers={"Origin": "https://other.test"}),
+        ):
+            pass
+        headers = {"Origin": "https://control.test"}
+        with self.http.websocket_connect(url, headers=headers) as stream:
+            self.assertEqual(stream.receive_json()["tunnels"], [])
+            with app.state.database.begin() as connection:
+                connection.execute(insert(tunnels), [
+                    {"id": node, "node_id": node, "run_id": "current", "proxy_name": node,
+                     "client_ip": "192.0.2.8", "remote_port": 30001, "status": "pending"}
+                    for node in ("a", "b")
+                ])
+            self.assertEqual([item["id"] for item in stream.receive_json()["tunnels"]], ["a", "b"])
+            path = "/api/admin/tunnels/a/blacklist"
+            payload = {"run_id": "current", "created_at": 0, "reason": "abuse", "duration": "1h"}
+            self.assertEqual(self.http.post(path, json={**payload, "created_at": 99}).status_code, 409)
+            self.assertEqual(self.http.post(path, json=payload).status_code, 202)
+            self.assertEqual(stream.receive_json()["tunnels"], [])
+            for node in ("a", "b"):
+                policy = node_policy(app.state.database, node)["blacklist"]
+                self.assertEqual(policy["entries"][0]["ip"], "192.0.2.8")
+                acknowledge_policy(app.state.database, node, "blacklist", policy["revision"], "")
+            listed = self.http.get("/api/admin/blacklist").json()
+            self.assertEqual(listed["entries"][0]["reason"], "abuse")
+            self.assertEqual(listed["pending_nodes"], [])
+            with app.state.database.begin() as connection:
+                connection.execute(blacklist.update().values(expires_at=time() - 1))
+            self.assertEqual(len(stream.receive_json()["tunnels"]), 2)
+            self.assertEqual(self.http.get("/api/admin/blacklist").json()["entries"], [])
+
+    def test_range_update_conflicts_then_waits_for_agent_ack(self):
+        self.register_policy_node("a")
+        payload = {"name": "A", "public_host": "a.example", "port_start": 30003, "port_end": 30007}
+        self.sign_in("reader")
+        self.assertEqual(self.http.patch("/api/admin/nodes/a", json=payload).status_code, 403)
+        self.sign_in("owner")
+        with app.state.database.begin() as connection:
+            connection.execute(insert(tunnels).values(
+                id="a", node_id="a", run_id="current", proxy_name="a",
+                remote_port=30001, status="pending",
+            ))
+        conflict = self.http.patch("/api/admin/nodes/a", json=payload)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertIn("30001", conflict.json()["detail"])
+        with app.state.database.begin() as connection:
+            connection.execute(tunnels.update().values(proxy_present=False, status="closed"))
+        self.assertEqual(self.http.patch("/api/admin/nodes/a", json=payload).json(), {"pending": True})
+        self.assertEqual(self.http.get("/api/v1/nodes").json()["nodes"][0]["port_start"], 30001)
+        policy = node_policy(app.state.database, "a")["range"]
+        acknowledge_policy(app.state.database, "a", "range", policy["revision"], "port occupied")
+        row = self.http.get("/api/admin/nodes").json()["nodes"][0]
+        self.assertEqual((row["port_start"], row["range_error"]), (30001, "port occupied"))
+        self.assertEqual(self.http.patch("/api/admin/nodes/a", json=payload).status_code, 200)
+        policy = node_policy(app.state.database, "a")["range"]
+        acknowledge_policy(app.state.database, "a", "range", policy["revision"], "")
+        row = self.http.get("/api/v1/nodes").json()["nodes"][0]
+        self.assertEqual((row["port_start"], row["port_end"]), (30003, 30007))
+        self.assertNotIn("token_hash", row)

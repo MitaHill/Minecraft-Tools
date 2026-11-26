@@ -1,6 +1,6 @@
 # 控制端与节点端方案（Docker Bridge）
 
-Control Server 已实现 Launcher 接口、旧大厅和管理台登录及列表。启动及构建命令见 [Control Server README](../control/README.md)。[分阶段实施](#13-分阶段实施)记录本地与 Phoenix 联调结果，以及节点端接入计划。
+Control Server 已实现 Launcher 接口、兼容大厅接口和管理台。启动及构建命令见 [Control Server README](../control/README.md)。[分阶段实施](#13-分阶段实施)记录本地与 Phoenix 联调结果，以及节点端接入计划。
 
 ## 1. 范围与决定
 
@@ -331,18 +331,25 @@ ack             {command_id, ok, error}
 ```text
 GET/POST/DELETE /api/admin/session
 GET/POST /api/admin/nodes
+PATCH    /api/admin/nodes/{id}
 GET      /api/admin/tunnels?status=
+WS       /api/admin/tunnels/live
 POST     /api/admin/tunnels/{id}/block
+POST     /api/admin/tunnels/{id}/blacklist
+GET      /api/admin/blacklist
+DELETE   /api/admin/blacklist/{ip}
 POST     /api/admin/tunnels/{id}/unblock
 POST     /api/admin/tunnels/{id}/rescan
 GET      /api/admin/scans
 GET/POST /api/admin/releases
 GET      /api/admin/diagnostics
 GET      /api/admin/lobby/rooms
+PATCH    /api/admin/lobby
+DELETE   /api/admin/lobby/rooms/{listing_id}
 GET      /api/admin/audit
 ```
 
-管理端已实现基于 Cookie 的服务端会话。超级管理员、运维和只读角色可读取节点和隧道，创建节点限超级管理员。创建响应只返回一次节点密钥，节点列表省略密钥及其摘要。[账号配置](../control/README.md#管理台前端)
+管理端已实现基于 Cookie 的服务端会话。超级管理员、运维和只读角色可读取管理页面。创建和编辑节点限超级管理员。创建响应只返回一次节点密钥，节点列表省略密钥及其摘要。[账号配置](../control/README.md#管理台前端)
 
 ## 7. 隧道发现与身份
 
@@ -423,7 +430,7 @@ frp server plugin 的 `NewProxy` 请求包含 `User.RunID`、`ProxyName`、`Remo
 | `circuit_breaker` | 20% | 一轮扫描失败率超过 20% 时暂停自动封禁并告警 |
 | `auto_unblock` | 关闭 | 默认人工解封；可配置连续成功后自动解封 |
 
-严格模式可以设 `failure_threshold=1`、`grace_period=0`，但误封会明显增加。当前自动封禁返回给客户端的文案暂为「测试」，后续按触发条件补充；实现上仍按连续失败计数。
+严格模式可以设 `failure_threshold=1`、`grace_period=0`，但误封会明显增加。达到连续失败阈值后，扫描器自动封禁当前隧道，并返回「未检测到 Minecraft Java 响应」。
 
 ### 8.4 安全约束
 

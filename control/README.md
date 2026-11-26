@@ -20,7 +20,7 @@ uv run --project control --locked --python 3.12 \
 
 ## 管理台前端
 
-前端位于 `control/web/`，使用 Vue 3、Vue Router、TypeScript、Vite 和 Element Plus。登录后可查看控制端状态、节点和隧道，并按状态筛选隧道。超级管理员可通过管理 API 创建节点，返回的新节点密钥仅出现一次。
+前端位于 `control/web/`，使用 Vue 3、Vue Router、TypeScript、Vite 和 Element Plus。登录后可查看实时隧道、节点、黑名单和公开联机大厅。节点编辑限超级管理员，封禁、拉黑、解除及大厅管理限超级管理员和运维。超级管理员可通过管理 API 创建节点，返回的新节点密钥仅出现一次。
 
 先按上文启动控制端，再在仓库根目录执行以下命令。需要 Node.js 22.12 或更高版本。
 
@@ -29,7 +29,7 @@ npm --prefix control/web ci
 npm --prefix control/web run dev
 ```
 
-打开 [http://127.0.0.1:5173/admin/](http://127.0.0.1:5173/admin/)。开发服务器把 `/health` 和 `/api/admin` 代理到 `http://127.0.0.1:8765`。使用其他后端地址时，在启动 Vite 前设定 `CONTROL_API_TARGET`。
+打开 [http://127.0.0.1:5173/admin/](http://127.0.0.1:5173/admin/)。开发服务器把 `/health` 和 `/api/admin` 代理到 `http://127.0.0.1:8765`，包括隧道页面使用的 WebSocket。使用其他后端地址时，在启动 Vite 前设定 `CONTROL_API_TARGET`。
 
 构建时运行 `npm --prefix control/web run build`，产物位于 `control/web/dist/`。重启控制端后可通过 [http://127.0.0.1:8765/admin/](http://127.0.0.1:8765/admin/) 同源访问。构建产物存在时，FastAPI 自动托管页面和静态资源。
 
@@ -108,4 +108,8 @@ docker compose -f control/compose.yaml -p minecrafttools-test cp \
 
 启用 `compose.node-hub.yaml` 后配置节点 Hub 的证书目录、监听地址和端口。先在管理台登记节点，把首次返回的节点密钥和信任证书交给 Agent。节点端使用 [Compose](../node/compose.yaml)，封禁通过 helper 在共享网络命名空间执行。
 
-`CONTROL_SCANNER_ENABLED=1` 启用扫描器。默认在宽限期后连续三次检测为非 Minecraft 才下发封禁。操作员可在管理台查看检测记录、发起重扫、封禁和解封。Phoenix 和香港节点的实际测试、客户端状态联动和发布计划见[控制端实施计划](../docs/control-server.md#13-分阶段实施)。
+`CONTROL_SCANNER_ENABLED=1` 启用扫描器。默认在宽限期后连续三次检测为非 Minecraft 才下发封禁。操作员可在隧道页面查看检测记录、发起重扫和封禁隧道，也可在黑名单页面解除封禁。
+
+Agent 上线后报告已发布的节点端口与 frps `allowPorts` 的交集。管理台在该范围内调整已登记的端口，Agent 确认后才生效。扩展部署范围时同步更新节点 Docker 配置、frps `allowPorts` 和 Agent 的环境变量，再让 Agent 重新注册连接。IPv4 和 IPv6 都以 frps 看到的连接来源为准。所有受控节点都要先升级 Agent 和 firewall-helper，局部升级期间仍可执行单隧道封禁。
+
+公开大厅关闭时，现有发布可续期，重新开放后仍有效的房间继续展示。单独下架的房间需要房主手动重新发布。新版受控客户端可用当前隧道凭据发布，旧客户端继续使用配置中的大厅探测目标。Phoenix 和香港节点的实际测试、客户端状态联动和发布计划见[控制端实施计划](../docs/control-server.md#13-分阶段实施)。

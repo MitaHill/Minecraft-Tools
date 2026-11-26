@@ -31,6 +31,7 @@ type Proxy struct {
 	ClaimID    string `json:"claim_id,omitempty"`
 	ClaimHash  string `json:"claim_hash,omitempty"`
 	Closed     bool   `json:"closed,omitempty"`
+	ClientIP   string `json:"client_ip,omitempty"`
 }
 
 type Agent struct {
@@ -43,6 +44,10 @@ type Agent struct {
 	firewallState  map[int]FirewallRequest
 	pendingBlocks  map[int]FirewallRequest
 	dashboard      *Dashboard
+	policy         nodePolicy
+	policyFile     string
+	policyReady    bool
+	recentProxies  map[string]time.Time
 }
 
 func openAgent(path string, start, end int) (*Agent, error) {
@@ -50,7 +55,8 @@ func openAgent(path string, start, end int) (*Agent, error) {
 		return nil, errors.New("invalid game port range")
 	}
 	agent := &Agent{stateFile: path, portStart: start, portEnd: end, proxies: make(map[string]Proxy),
-		firewallState: make(map[int]FirewallRequest), pendingBlocks: make(map[int]FirewallRequest)}
+		firewallState: make(map[int]FirewallRequest), pendingBlocks: make(map[int]FirewallRequest),
+		policyReady: true, recentProxies: make(map[string]time.Time)}
 	body, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return agent, nil
@@ -190,11 +196,12 @@ type pluginRequest struct {
 		User struct {
 			RunID string `json:"run_id"`
 		} `json:"user"`
-		ProxyName  string            `json:"proxy_name"`
-		ProxyType  string            `json:"proxy_type"`
-		RemotePort int               `json:"remote_port"`
-		Group      string            `json:"group"`
-		Metas      map[string]string `json:"metas"`
+		ProxyName     string            `json:"proxy_name"`
+		ProxyType     string            `json:"proxy_type"`
+		RemotePort    int               `json:"remote_port"`
+		Group         string            `json:"group"`
+		Metas         map[string]string `json:"metas"`
+		ClientAddress string            `json:"client_address"`
 	} `json:"content"`
 }
 
@@ -221,6 +228,19 @@ func (agent *Agent) plugin(response http.ResponseWriter, request *http.Request) 
 	defer agent.mu.Unlock()
 	switch operation := request.URL.Query().Get("op"); operation {
 	case "Login":
+		if !agent.policyReady {
+			pluginReply(response, "node policy is synchronizing")
+			return
+		}
+		if content.ClientAddress != "" {
+			if reason := agent.checkLogin(content.ClientAddress); reason != "" {
+				pluginReply(response, reason)
+				return
+			}
+		} else if agent.hasActiveBlacklist() {
+			pluginReply(response, "FRP client address unavailable")
+			return
+		}
 	case "NewUserConn":
 		registered, found := agent.proxies[proxy.Name]
 		if !found || registered.Closed || registered.RunID != proxy.RunID || agent.portBlocked(registered.RemotePort) {
@@ -228,8 +248,27 @@ func (agent *Agent) plugin(response http.ResponseWriter, request *http.Request) 
 			return
 		}
 	case "NewProxy":
+		start, end := agent.portStart, agent.portEnd
+		if policy := agent.policy.Range; policy != nil {
+			start, end = max(start, policy.Start), min(end, policy.End)
+		}
+		if !agent.policyReady {
+			pluginReply(response, "node policy is synchronizing")
+			return
+		}
+		if agent.hasActiveBlacklist() {
+			clients, err := agent.dashboard.activeClients(request.Context())
+			if err != nil || clients[proxy.RunID] == "" {
+				pluginReply(response, "FRP client address unavailable")
+				return
+			}
+			if reason := agent.blockedIP(clients[proxy.RunID]); reason != "" {
+				pluginReply(response, reason)
+				return
+			}
+		}
 		if content.ProxyType != "tcp" || content.Group != "" ||
-			proxy.RemotePort < agent.portStart || proxy.RemotePort > agent.portEnd {
+			proxy.RemotePort < start || proxy.RemotePort > end {
 			pluginReply(response, "only a dedicated TCP port in the configured range is allowed")
 			return
 		}
@@ -261,7 +300,17 @@ func (agent *Agent) plugin(response http.ResponseWriter, request *http.Request) 
 			pluginReply(response, "proxy registry unavailable")
 			return
 		}
+		now := time.Now()
+		for name, registered := range agent.recentProxies {
+			if now.Sub(registered) > 30*time.Second {
+				delete(agent.recentProxies, name)
+			}
+		}
+		agent.recentProxies[proxy.Name] = now
 	case "CloseProxy":
+		if previous, ok := agent.proxies[proxy.Name]; ok && previous.RunID == proxy.RunID {
+			delete(agent.recentProxies, proxy.Name)
+		}
 		if err := agent.saveProxy(proxy, true); err != nil {
 			log.Printf("remove proxy: %v", err)
 		}
@@ -330,6 +379,11 @@ func runAgent(ctx context.Context) error {
 		return err
 	}
 	agent.dashboard = dashboard
+	agent.policyFile = filepath.Join(filepath.Dir(agent.stateFile), "policy.json")
+	agent.policyReady = false
+	if err := agent.loadPolicy(); err != nil {
+		return err
+	}
 	agent.firewallSocket = envOr("FIREWALL_SOCKET", firewallSocket)
 	if err := agent.syncFirewall(ctx); err != nil {
 		return fmt.Errorf("firewall not ready: %w", err)
@@ -346,7 +400,7 @@ func runAgent(ctx context.Context) error {
 		defer close(finished)
 		connection.run(child, func(ctx context.Context) ([]Proxy, error) {
 			return dashboard.snapshot(ctx, agent)
-		}, agent.executeCommand)
+		}, agent.executeCommand, agent)
 	}()
 	go func() {
 		<-child.Done()

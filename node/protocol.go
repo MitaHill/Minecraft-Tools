@@ -89,6 +89,7 @@ type ControlReply struct {
 	Seq     int64  `json:"seq"`
 	Payload struct {
 		Commands []FirewallRequest `json:"commands"`
+		Policy   *nodePolicy       `json:"policy"`
 	} `json:"payload"`
 }
 
@@ -121,6 +122,19 @@ func (session *ControlSession) send(kind string, payload any) (ControlReply, err
 	return response, nil
 }
 
+func (session *ControlSession) ackPolicy(kind string, revision int64, failure error) error {
+	message := ""
+	if failure != nil {
+		log.Printf("could not apply %s policy: %v", kind, failure)
+		detail := []rune(failure.Error())
+		message = string(detail[:min(300, len(detail))])
+	}
+	_, err := session.send("policy_ack", map[string]any{
+		"kind": kind, "revision": revision, "error": message,
+	})
+	return err
+}
+
 func (control *ControlConnection) dial(ctx context.Context) (net.Conn, error) {
 	if control.endpoint == "" {
 		dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: 6 * time.Second}, Config: control.tls}
@@ -141,7 +155,12 @@ func (control *ControlConnection) dial(ctx context.Context) (net.Conn, error) {
 	return connection, nil
 }
 
-func (control *ControlConnection) session(ctx context.Context, snapshot func(context.Context) ([]Proxy, error), execute func(context.Context, FirewallRequest) error) error {
+func (control *ControlConnection) session(ctx context.Context, snapshot func(context.Context) ([]Proxy, error), execute func(context.Context, FirewallRequest) error, agent *Agent) error {
+	ports, err := agent.dashboard.deployedPorts(ctx, agent.portStart, agent.portEnd)
+	if err != nil {
+		return fmt.Errorf("read deployed ports: %w", err)
+	}
+	control.hello["deployed_ports"] = ports
 	connection, err := control.dial(ctx)
 	if err != nil {
 		return err
@@ -150,7 +169,36 @@ func (control *ControlConnection) session(ctx context.Context, snapshot func(con
 	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	defer stop()
 	session := ControlSession{connection: connection, reader: bufio.NewReaderSize(connection, maxMessageSize)}
-	if _, err := session.send("hello", control.hello); err != nil {
+	initial, err := session.send("hello", control.hello)
+	if err != nil {
+		return err
+	}
+	rangeRevision := int64(-1)
+	apply := func(policy *nodePolicy) error {
+		if policy == nil {
+			return nil
+		}
+		if current := policy.Blacklist; current != nil {
+			err := agent.applyBlacklist(ctx, *current)
+			if err := session.ackPolicy("blacklist", current.Revision, err); err != nil {
+				return err
+			}
+		}
+		if current := policy.Range; current != nil && current.Revision != rangeRevision {
+			err := agent.applyRange(ctx, *current, ports)
+			if err == nil {
+				rangeRevision = current.Revision
+			}
+			return session.ackPolicy("range", current.Revision, err)
+		}
+		return nil
+	}
+	if initial.Payload.Policy == nil {
+		agent.mu.Lock()
+		agent.policyReady = true // Control servers without policy support use the deployment limits.
+		agent.mu.Unlock()
+	}
+	if err := apply(initial.Payload.Policy); err != nil {
 		return err
 	}
 	log.Print("connected to control server")
@@ -192,6 +240,9 @@ func (control *ControlConnection) session(ctx context.Context, snapshot func(con
 			if err != nil {
 				return err
 			}
+			if err := apply(reply.Payload.Policy); err != nil {
+				return err
+			}
 			for _, command := range reply.Payload.Commands {
 				result := map[string]any{"command_id": command.CommandID, "ok": true}
 				if err := execute(ctx, command); err != nil {
@@ -209,11 +260,11 @@ func (control *ControlConnection) session(ctx context.Context, snapshot func(con
 	}
 }
 
-func (control *ControlConnection) run(ctx context.Context, snapshot func(context.Context) ([]Proxy, error), execute func(context.Context, FirewallRequest) error) {
+func (control *ControlConnection) run(ctx context.Context, snapshot func(context.Context) ([]Proxy, error), execute func(context.Context, FirewallRequest) error, agent *Agent) {
 	delay := time.Second
 	for ctx.Err() == nil {
 		started := time.Now()
-		err := control.session(ctx, snapshot, execute)
+		err := control.session(ctx, snapshot, execute, agent)
 		if ctx.Err() != nil {
 			return
 		}

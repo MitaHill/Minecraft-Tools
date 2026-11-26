@@ -1,24 +1,42 @@
+import asyncio
 import json
+import logging
+from asyncio import to_thread
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_urlsafe
 from time import time
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from argon2 import PasswordHasher, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from sqlalchemy import Column, Float, String, Table, delete, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
+from starlette.requests import HTTPConnection
+from starlette.websockets import WebSocketDisconnect
 
 from .database import metadata, record_admin_action
+from .lobby import live_rooms, rooms
+from .moderation import (
+    active_blacklist,
+    blacklist,
+    canonical_ip,
+    live_tunnels,
+    lock_settings,
+    removals,
+    settings,
+)
 from .rate_limit import RateLimit
-from .registry import nodes, tunnels
+from .registry import blocks, nodes, tunnel_claims, tunnels
 from .scanner import SCANNABLE, scans
 from .tunnel_commands import CommandConflict, enqueue_command
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin")
 hasher = PasswordHasher()
 SESSION_COOKIE = "minecrafttools_session"
@@ -52,10 +70,22 @@ class Login(BaseModel):
 
 class TunnelBlock(BaseModel):
     reason: str = Field(default="管理员封禁", min_length=1, max_length=200)
+    run_id: str | None = Field(default=None, min_length=1, max_length=200)
+    created_at: float | None = None
 
 
-class NodeRegistration(BaseModel):
-    id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+class TunnelBlacklist(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    created_at: float
+    reason: str = Field(min_length=1, max_length=200)
+    duration: Literal["1h", "24h", "7d", "30d", "permanent"]
+
+
+class LobbyToggle(BaseModel):
+    enabled: bool
+
+
+class NodeConfiguration(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     public_host: str = Field(min_length=1, max_length=253)
     port_start: int = Field(ge=1024, le=65535)
@@ -66,6 +96,10 @@ class NodeRegistration(BaseModel):
         if self.port_end < self.port_start:
             raise ValueError("port_end must be greater than or equal to port_start")
         return self
+
+
+class NodeRegistration(NodeConfiguration):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
 @dataclass
@@ -105,7 +139,7 @@ def same_origin(request: Request) -> None:
         raise HTTPException(403, "Origin not allowed")
 
 
-def current_account(request: Request) -> Account:
+def current_account(request: HTTPConnection) -> Account:
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         query = select(sessions.c.username).where(
@@ -239,7 +273,8 @@ def list_tunnels(
 
 
 def change_tunnel_block(
-    tunnel_id: str, action: str, reason: str, request: Request, account: Account
+    tunnel_id: str, action: str, reason: str, request: Request, account: Account,
+    run_id: str | None = None, created_at: float | None = None,
 ):
     try:
         command = enqueue_command(
@@ -248,6 +283,8 @@ def change_tunnel_block(
             action,
             reason,
             f"admin:{account.username}",
+            expected_run_id=run_id,
+            expected_created_at=created_at,
         )
     except CommandConflict as error:
         raise HTTPException(409, str(error)) from None
@@ -262,7 +299,10 @@ def change_tunnel_block(
 def block_tunnel(
     tunnel_id: str, payload: TunnelBlock, request: Request, account: Operator
 ):
-    return change_tunnel_block(tunnel_id, "block", payload.reason, request, account)
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(422, "请输入封禁理由")
+    return change_tunnel_block(tunnel_id, "block", reason, request, account, payload.run_id, payload.created_at)
 
 
 @router.post(
@@ -313,3 +353,262 @@ def rescan_tunnel(tunnel_id: str, request: Request, account: Operator):
             raise HTTPException(409, "Tunnel is not eligible for scanning")
         record_admin_action(connection, account.username, "tunnel.rescan", tunnel_id)
     return {"status": "scheduled"}
+
+
+@router.patch("/nodes/{node_id}", dependencies=[Depends(same_origin)])
+def edit_node(node_id: str, payload: NodeConfiguration, request: Request, account: SignedIn):
+    if account.role != "superadmin":
+        raise HTTPException(403, "Superadmin permission required")
+    name, host = payload.name.strip(), payload.public_host.strip().rstrip(".").lower()
+    try:
+        parsed = urlsplit(f"//[{host}]" if ":" in host else f"//{host}")
+        valid_host = (
+            parsed.hostname == host and not parsed.path and not parsed.query
+            and not parsed.fragment and parsed.username is None
+            and not any(char.isspace() or char in "/\\?#@[]" for char in host)
+        )
+    except ValueError:
+        valid_host = False
+    if not name or not host or not valid_host:
+        raise HTTPException(422, "请输入有效的节点名称和公网主机名或 IP")
+    start, end = payload.port_start, payload.port_end
+    with request.app.state.database.begin() as connection:
+        lock_settings(connection)
+        node = connection.execute(select(nodes).where(nodes.c.id == node_id)).mappings().one_or_none()
+        if node is None:
+            raise HTTPException(404, "节点不存在")
+        changing_range = (start, end) != (node["port_start"], node["port_end"])
+        changing_host = host != node["public_host"]
+        if node["pending_port_start"] is not None:
+            raise HTTPException(409, "节点正在应用端口范围")
+        if changing_range or changing_host:
+            if node["status"] != "online":
+                raise HTTPException(409, "节点上线后可以修改公网地址和映射端口范围")
+            live_ports = select(tunnels.c.remote_port).where(
+                tunnels.c.node_id == node_id,
+                tunnels.c.proxy_present.is_(True),
+                tunnels.c.status != "closed",
+            )
+            claims = select(tunnel_claims.c.remote_port).where(
+                tunnel_claims.c.node_id == node_id, tunnel_claims.c.expires_at > time()
+            )
+            reserved = select(blocks.c.port).where(blocks.c.node_id == node_id, blocks.c.active)
+            used = set(connection.execute(live_ports.union(claims, reserved)).scalars())
+            conflicts = sorted(port for port in used if changing_host or not start <= port <= end)
+            if conflicts:
+                ports = "、".join(map(str, conflicts))
+                raise HTTPException(409, f"以下端口仍在使用或预留：{ports}")
+        values = {"name": name, "public_host": host}
+        if changing_range:
+            deployed = node["deployed_ports"]
+            if deployed is None:
+                raise HTTPException(409, "节点 Agent 尚未同步部署端口范围")
+            if not any(low <= start <= end <= high for low, high in deployed):
+                raise HTTPException(422, "映射范围须在节点已部署的端口范围内")
+            values.update(
+                pending_port_start=start, pending_port_end=end,
+                range_revision=node["range_revision"] + 1, range_error=None,
+            )
+        connection.execute(update(nodes).where(nodes.c.id == node_id).values(**values))
+        record_admin_action(connection, account.username, "node.edit", node_id)
+    return {"pending": changing_range}
+
+
+def tunnel_snapshot(database):
+    query = (
+        select(
+            tunnels.c.id, tunnels.c.run_id, tunnels.c.created_at, tunnels.c.proxy_name, tunnels.c.status,
+            tunnels.c.node_id, tunnels.c.remote_port, tunnels.c.client_ip,
+        ).join(nodes).where(live_tunnels(time())).order_by(tunnels.c.node_id, tunnels.c.id)
+    )
+    with database.connect() as connection:
+        return list(map(dict, connection.execute(query).mappings()))
+
+
+async def stream_tunnels(app):
+    current = None
+    sent = set()
+    while True:
+        subscribers = app.state.tunnel_subscribers
+        if subscribers:
+            try:
+                rows = await to_thread(tunnel_snapshot, app.state.database)
+            except SQLAlchemyError:
+                logger.exception("Could not read live tunnels")
+            else:
+                sent.intersection_update(subscribers)
+                recipients = subscribers if rows != current else subscribers - sent
+                for queue in recipients:
+                    if queue.full():
+                        queue.get_nowait()
+                    queue.put_nowait(rows)
+                sent.update(recipients)
+                current = rows
+        else:
+            sent.clear()
+            current = None
+        await asyncio.sleep(1)
+
+
+@router.websocket("/tunnels/live")
+async def watch_tunnels(socket: WebSocket):
+    scheme = "https" if socket.url.scheme == "wss" else "http"
+    if socket.headers.get("origin") != f"{scheme}://{socket.url.netloc}":
+        await socket.close(code=1008)
+        return
+    try:
+        await to_thread(current_account, socket)
+    except HTTPException:
+        await socket.close(code=1008)
+        return
+    await socket.accept()
+    app = socket.app
+    queue = asyncio.Queue(maxsize=1)
+    app.state.tunnel_subscribers.add(queue)
+    receiver = asyncio.create_task(socket.receive())
+    try:
+        last_auth = time()
+        while not receiver.done():
+            now = time()
+            if now - last_auth >= 5:
+                try:
+                    await to_thread(current_account, socket)
+                except HTTPException:
+                    await socket.close(code=1008)
+                    return
+                last_auth = now
+            update_rows = asyncio.create_task(queue.get())
+            try:
+                ready, _ = await asyncio.wait(
+                    (receiver, update_rows), timeout=5, return_when=asyncio.FIRST_COMPLETED
+                )
+                if receiver in ready:
+                    return
+                if update_rows in ready:
+                    await socket.send_json({
+                        "tunnels": update_rows.result(), "scanner_enabled": app.state.scanner_enabled,
+                    })
+                else:
+                    await socket.send_json({"type": "heartbeat"})
+            finally:
+                update_rows.cancel()
+    except (OSError, WebSocketDisconnect):
+        pass
+    finally:
+        receiver.cancel()
+        app.state.tunnel_subscribers.discard(queue)
+
+
+DURATIONS = {"1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000}
+
+
+@router.post("/tunnels/{tunnel_id}/blacklist", status_code=202, dependencies=[Depends(same_origin)])
+def blacklist_tunnel(tunnel_id: str, payload: TunnelBlacklist, request: Request, account: Operator):
+    now = time()
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(422, "请输入封禁理由")
+    duration = DURATIONS.get(payload.duration)
+    with request.app.state.database.begin() as connection:
+        lock_settings(connection)
+        tunnel = connection.execute(
+            select(tunnels).join(nodes).where(
+                tunnels.c.id == tunnel_id, tunnels.c.run_id == payload.run_id,
+                tunnels.c.created_at == payload.created_at, live_tunnels(now)
+            )
+        ).mappings().one_or_none()
+        if tunnel is None:
+            raise HTTPException(409, "隧道已变化，请刷新后重试")
+        ip = canonical_ip(tunnel["client_ip"])
+        if ip is None:
+            raise HTTPException(409, "此隧道尚无可验证的客户端 IP")
+        unsupported = connection.execute(
+            select(nodes.c.id).where(nodes.c.deployed_ports.is_(None)).order_by(nodes.c.id)
+        ).scalars().all()
+        if unsupported:
+            raise HTTPException(409, "以下节点尚未同步策略能力：" + "、".join(unsupported))
+        values = {
+            "reason": reason, "actor": account.username, "created_at": now,
+            "expires_at": now + duration if duration else None, "removed_at": None,
+        }
+        connection.execute(
+            sqlite_insert(blacklist).values(ip=ip, **values)
+            .on_conflict_do_update(index_elements=[blacklist.c.ip], set_=values)
+        )
+        affected = select(tunnels.c.id).where(tunnels.c.client_ip == ip)
+        connection.execute(delete(rooms).where(
+            (rooms.c.client_ip == ip) | rooms.c.tunnel_id.in_(affected)
+        ))
+        connection.execute(update(settings).values(blacklist_revision=settings.c.blacklist_revision + 1))
+        record_admin_action(connection, account.username, "blacklist.add", ip)
+    return {"ip": ip, "status": "pending"}
+
+
+@router.get("/blacklist")
+def list_blacklist(request: Request, _account: SignedIn):
+    now = time()
+    with request.app.state.database.connect() as connection:
+        ips = connection.execute(
+            select(blacklist).where(active_blacklist(now)).order_by(blacklist.c.created_at.desc())
+        ).mappings()
+        entries = list(map(dict, ips))
+        tunnel_blocks = connection.execute(
+            select(blocks, tunnels.c.status).join(tunnels).where(blocks.c.active)
+            .order_by(blocks.c.created_at.desc())
+        ).mappings()
+        blocked = list(map(dict, tunnel_blocks))
+        revision = connection.execute(select(settings.c.blacklist_revision)).scalar_one()
+        pending_nodes = list(map(dict, connection.execute(
+            select(nodes.c.id, nodes.c.status, nodes.c.blacklist_error)
+            .where(nodes.c.blacklist_revision.is_distinct_from(revision)).order_by(nodes.c.id)
+        ).mappings())) if revision else []
+    return {"entries": entries, "blocks": blocked, "pending_nodes": pending_nodes}
+
+
+@router.delete("/blacklist/{ip}", status_code=204, dependencies=[Depends(same_origin)])
+def remove_blacklist(ip: str, request: Request, account: Operator):
+    address = canonical_ip(ip)
+    now = time()
+    with request.app.state.database.begin() as connection:
+        removed = connection.execute(
+            update(blacklist).where(blacklist.c.ip == address, active_blacklist(now))
+            .values(removed_at=now)
+        )
+        if removed.rowcount:
+            connection.execute(update(settings).values(blacklist_revision=settings.c.blacklist_revision + 1))
+            record_admin_action(connection, account.username, "blacklist.remove", address)
+
+
+@router.get("/lobby/rooms")
+def admin_rooms(request: Request, _account: SignedIn):
+    with request.app.state.database.connect() as connection:
+        enabled = connection.execute(select(settings.c.lobby_enabled)).scalar_one()
+        return {"enabled": enabled, "rooms": live_rooms(connection)}
+
+
+@router.patch("/lobby", dependencies=[Depends(same_origin)])
+def edit_lobby(payload: LobbyToggle, request: Request, account: Operator):
+    with request.app.state.database.begin() as connection:
+        changed = connection.execute(update(settings).where(
+            settings.c.lobby_enabled != payload.enabled
+        ).values(lobby_enabled=payload.enabled))
+        if changed.rowcount:
+            action = "lobby.open" if payload.enabled else "lobby.close"
+            record_admin_action(connection, account.username, action, "public")
+    return {"enabled": payload.enabled}
+
+
+@router.delete("/lobby/rooms/{listing_id}", status_code=204, dependencies=[Depends(same_origin)])
+def unlist_room(listing_id: str, request: Request, account: Operator):
+    with request.app.state.database.begin() as connection:
+        entry = connection.execute(
+            delete(rooms).where(rooms.c.listing_id == listing_id).returning(
+                rooms.c.full_room_code, rooms.c.client_ip, rooms.c.publication_id
+            )
+        ).one_or_none()
+        if entry is not None:
+            connection.execute(sqlite_insert(removals).values(
+                code=entry.full_room_code, owner=entry.client_ip,
+                publication_id=entry.publication_id or "", removed_at=time(),
+            ).on_conflict_do_nothing())
+            record_admin_action(connection, account.username, "lobby.unlist", listing_id)

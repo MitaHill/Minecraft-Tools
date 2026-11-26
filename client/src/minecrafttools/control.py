@@ -111,11 +111,28 @@ class TunnelControl(QObject):
 
         reply.finished.connect(finished)
 
+    def nodes(self, callback) -> None:
+        self.request(b"GET", "nodes", callback, authorized=False)
+
     def reserve(self, node_id: str, port: int, callback) -> None:
         def enroll():
             self.request(b"POST", "installs/register", enrolled, authorized=False)
 
+        def denied(data):
+            detail = data.get("detail")
+            if isinstance(detail, dict):
+                if detail.get("code") == "ip_blacklisted":
+                    reason = detail.get("reason")
+                    callback(None, f"客户端 IP 已被拉黑。{reason or ''}")
+                    return True
+                if detail.get("code") == "node_range_pending":
+                    callback(None, "节点正在更新端口范围，请稍后重试。")
+                    return True
+            return False
+
         def enrolled(code, data):
+            if denied(data):
+                return
             install_id = data.get("install_id")
             if not (
                 code == 201
@@ -134,6 +151,8 @@ class TunnelControl(QObject):
             request_port(retry=False)
 
         def reserved(code, data, retry):
+            if denied(data):
+                return
             if code == 401 and retry:
                 enroll()
                 return

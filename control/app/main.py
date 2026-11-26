@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from .admin import Administration
+from .admin import Administration, stream_tunnels
 from .admin import router as admin_router
 from .client_api import router as client_router
 from .database import diagnostics, open_database
@@ -61,6 +61,8 @@ async def lifespan(app: FastAPI):
     app.state.install_rate_limit = RateLimit(10, 300)
     app.state.claim_rate_limit = RateLimit(30, 60)
     cleanup = create_task(cleanup_lobby(database))
+    app.state.tunnel_subscribers = set()
+    stream = create_task(stream_tunnels(app))
     hub = None
     scanner = None
     stop_scanner = Event()
@@ -97,6 +99,9 @@ async def lifespan(app: FastAPI):
         if scanner is not None:
             stop_scanner.set()
             await scanner
+        stream.cancel()
+        with suppress(CancelledError):
+            await stream
         cleanup.cancel()
         with suppress(CancelledError):
             await cleanup

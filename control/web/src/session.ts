@@ -9,6 +9,7 @@ export const account = shallowRef<Account | null>(null)
 
 export async function checkSession() {
   const response = await fetch('/api/admin/session', { cache: 'no-store' })
+  if (response.status !== 401 && !response.ok) throw new Error("无法连接控制端。")
   account.value = response.ok ? (await response.json() as Account) : null
   return account.value
 }

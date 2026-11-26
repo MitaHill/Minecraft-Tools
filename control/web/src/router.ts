@@ -1,13 +1,16 @@
-import { Connection, Grid, Monitor } from '@element-plus/icons-vue'
+import { Connection, Grid, House, Lock, Monitor } from '@element-plus/icons-vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { checkSession } from './session'
 import OverviewView from './views/OverviewView.vue'
-import ResourceView from './views/ResourceView.vue'
+import NodesView from './views/NodesView.vue'
+import TunnelsView from './views/TunnelsView.vue'
 
 export const navigation = [
   { name: 'overview', label: '概览', icon: Grid },
   { name: 'nodes', label: '节点', icon: Monitor },
   { name: 'tunnels', label: '隧道', icon: Connection },
+  { name: 'blacklist', label: '黑名单', icon: Lock },
+  { name: 'lobby', label: '公开联机大厅', icon: House },
 ] as const
 
 export const router = createRouter({
@@ -21,16 +24,22 @@ export const router = createRouter({
     {
       path: '/nodes',
       name: 'nodes',
-      component: ResourceView,
-      props: { title: '节点', icon: Monitor, kind: 'nodes' },
+      component: NodesView,
       meta: { title: '节点', protected: true },
     },
     {
       path: '/tunnels',
       name: 'tunnels',
-      component: ResourceView,
-      props: { title: '隧道', icon: Connection, kind: 'tunnels' },
+      component: TunnelsView,
       meta: { title: '隧道', protected: true },
+    },
+    {
+      path: '/blacklist', name: 'blacklist', component: () => import('./views/BlacklistView.vue'),
+      meta: { title: '黑名单', protected: true },
+    },
+    {
+      path: '/lobby', name: 'lobby', component: () => import('./views/LobbyView.vue'),
+      meta: { title: '公开联机大厅', protected: true },
     },
     {
       path: '/:pathMatch(.*)*',

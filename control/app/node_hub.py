@@ -17,7 +17,8 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from .registry import nodes, tunnel_claims, tunnels
+from .moderation import acknowledge_policy, active_blacklist, blacklist, canonical_ip, node_policy
+from .registry import blocks, nodes, tunnel_claims, tunnels
 from .tunnel_commands import acknowledge_command, next_command
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class Hello(BaseModel):
     agent_version: str = Field(min_length=1, max_length=80)
     frps_version: str = Field(min_length=1, max_length=80)
     public_host: str | None = Field(default=None, max_length=253)
+    deployed_ports: list[tuple[int, int]] | None = Field(default=None, max_length=128)
 
 
 class Proxy(BaseModel):
@@ -52,6 +54,7 @@ class Proxy(BaseModel):
     remote_port: int = Field(ge=1, le=65535)
     claim_id: str | None = Field(default=None, max_length=32)
     claim_hash: str | None = Field(default=None, max_length=64)
+    client_ip: str | None = Field(default=None, max_length=64)
 
 
 class Snapshot(BaseModel):
@@ -61,6 +64,12 @@ class Snapshot(BaseModel):
 class CommandAcknowledgement(BaseModel):
     command_id: int = Field(ge=1, le=2**63 - 1, strict=True)
     ok: bool = Field(strict=True)
+    error: str = Field(default="", max_length=300)
+
+
+class PolicyAcknowledgement(BaseModel):
+    kind: Literal["range", "blacklist"]
+    revision: int = Field(ge=0, le=2**63 - 1, strict=True)
     error: str = Field(default="", max_length=300)
 
 
@@ -212,10 +221,15 @@ class NodeHub:
         query = select(nodes).where(nodes.c.id == hello.node_id)
         with self.database.connect() as connection:
             node = connection.execute(query).mappings().one_or_none()
+            needs_policy = hello.deployed_ports is None and connection.execute(
+                select(select(blacklist.c.ip).where(active_blacklist(time())).exists())
+            ).scalar_one()
         if node is None or not compare_digest(
             node["token_hash"], sha256(hello.secret.encode()).hexdigest()
         ):
             raise ProtocolError("authentication failed")
+        if needs_policy:
+            raise ProtocolError("node does not support the active IP blacklist")
         return node
 
     def set_online(self, hello: Hello):
@@ -228,6 +242,8 @@ class NodeHub:
                     last_seen=time(),
                     agent_version=hello.agent_version,
                     frps_version=hello.frps_version,
+                    deployed_ports=hello.deployed_ports,
+                    blacklist_revision=None,
                 )
             )
 
@@ -251,12 +267,19 @@ class NodeHub:
                 .values(status="offline")
             )
 
+    def record_current_snapshot(self, node_id, items):
+        with self.database.connect() as connection:
+            node = connection.execute(select(nodes).where(nodes.c.id == node_id)).mappings().one()
+        self.record_snapshot(node, items)
+
     def record_snapshot(self, node, items: list[Proxy]):
         names = {item.proxy_name for item in items}
         ports = {item.remote_port for item in items}
         if len(names) != len(items) or len(ports) != len(items):
             raise ProtocolError("duplicate proxy name or port")
-        if any(not node["port_start"] <= port <= node["port_end"] for port in ports):
+        deployed = node.get("deployed_ports")
+        allowed = deployed if deployed is not None else [(node["port_start"], node["port_end"])]
+        if any(not any(start <= port <= end for start, end in allowed) for port in ports):
             raise ProtocolError("proxy outside configured port range")
         node_id = node["id"]
         host = node["public_host"]
@@ -299,6 +322,7 @@ class NodeHub:
                         .returning(tunnel_claims.c.install_id)
                     ).scalar_one_or_none()
                 remote_addr = f"{host}:{item.remote_port}"
+                client_ip = canonical_ip(item.client_ip)
                 statement = insert(tunnels).values(
                     id=str(
                         uuid5(
@@ -311,6 +335,7 @@ class NodeHub:
                     remote_port=item.remote_port,
                     install_id=install_id,
                     remote_addr=remote_addr,
+                    client_ip=client_ip,
                     status="pending",
                     created_at=now,
                     next_scan_at=now,
@@ -327,6 +352,10 @@ class NodeHub:
                         "run_id": item.run_id,
                         "remote_port": item.remote_port,
                         "remote_addr": remote_addr,
+                        "client_ip": case(
+                            (same_generation, func.coalesce(client_ip, tunnels.c.client_ip)),
+                            else_=client_ip,
+                        ),
                         "install_id": install_id,
                         "proxy_present": True,
                         "status": case(
@@ -368,6 +397,16 @@ class NodeHub:
                     )
                     .values(proxy_present=True)
                 )
+                if client_ip:
+                    connection.execute(update(blocks).where(
+                        blocks.c.tunnel_id == select(tunnels.c.id).where(
+                            tunnels.c.node_id == node_id,
+                            tunnels.c.proxy_name == item.proxy_name,
+                        ).scalar_subquery(),
+                        blocks.c.run_id == item.run_id,
+                        blocks.c.proxy_name == item.proxy_name,
+                        blocks.c.client_ip.is_(None),
+                    ).values(client_ip=client_ip))
 
     async def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         await self.serve(TLSNodeConnection(reader, writer))
@@ -384,7 +423,11 @@ class NodeHub:
             hello = Hello.model_validate(first.payload)
             if isinstance(connection, TLSNodeConnection):
                 connection.verify_identity(hello.node_id)
-            node = await asyncio.to_thread(self.authenticate, hello)
+            if hello.deployed_ports is not None and any(
+                not 1024 <= start <= end <= 65535 for start, end in hello.deployed_ports
+            ):
+                raise ProtocolError("invalid deployed port ranges")
+            await asyncio.to_thread(self.authenticate, hello)
             node_id = hello.node_id
             lock = self.locks.setdefault(node_id, asyncio.Lock())
             async with lock:
@@ -393,7 +436,9 @@ class NodeHub:
                 self.sessions[node_id] = task
                 if previous is not None:
                     previous.cancel()
-            await self.acknowledge(connection, first)
+            policy = (await asyncio.to_thread(node_policy, self.database, node_id)
+                      if hello.deployed_ports is not None else None)
+            await self.acknowledge(connection, first, {"policy": policy} if policy else None)
             logger.info("Node authenticated node_id=%s", node_id)
 
             last_seq = first.seq
@@ -415,7 +460,7 @@ class NodeHub:
                     if message.type == "tunnel_snapshot":
                         snapshot = Snapshot.model_validate(message.payload)
                         await asyncio.to_thread(
-                            self.record_snapshot, node, snapshot.tunnels
+                            self.record_current_snapshot, node_id, snapshot.tunnels
                         )
                     elif message.type == "heartbeat":
                         last_heartbeat = clock()
@@ -426,6 +471,14 @@ class NodeHub:
                             next_command, self.database, node_id
                         )
                         payload = {"commands": [command] if command is not None else []}
+                        if hello.deployed_ports is not None:
+                            payload["policy"] = await asyncio.to_thread(node_policy, self.database, node_id)
+                    elif message.type == "policy_ack" and hello.deployed_ports is not None:
+                        result = PolicyAcknowledgement.model_validate(message.payload)
+                        await asyncio.to_thread(
+                            acknowledge_policy, self.database, node_id, result.kind,
+                            result.revision, result.error,
+                        )
                     elif message.type == "ack":
                         result = CommandAcknowledgement.model_validate(message.payload)
                         accepted = await asyncio.to_thread(

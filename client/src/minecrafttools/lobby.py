@@ -1,6 +1,7 @@
 import json
 import os
 from hashlib import sha256
+from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -69,13 +70,18 @@ class RoomCard(QFrame):
 
 class LobbyTab(QWidget):
     publication_status = Signal(str)
+    publication_removed = Signal()
 
-    def __init__(self, control: str = ""):
+    def __init__(self, control: str = "", token=None):
         super().__init__()
         self.api = os.environ.get(
             "MINECRAFTTOOLS_LOBBY_URL", os.environ.get("MINECRAFTFRP_LOBBY_URL", f"{control}/api/v1/lobby" if control else "")
         ).strip().rstrip("/")
         self.network = QNetworkAccessManager(self)
+        self.control_lobby = bool(control) and self.api.rstrip("/") in (
+            f"{control}/api/v1/lobby", f"{control}/api/lobby"
+        )
+        self.token = token
         self.active_room = None
         self.last_sent = None
         self.publication_pending = False
@@ -85,8 +91,9 @@ class LobbyTab(QWidget):
         self.heartbeat.timeout.connect(self.sync_publication)
         self.presence_timer = QTimer(self)
         self.presence_timer.setInterval(5000)
-        self.presence_timer.timeout.connect(self.sync_presence)
+        self.presence_timer.timeout.connect(self.sync_lobby)
         self.presence_pending = False
+        self.rooms_pending = False
         self.visited = False
 
         layout = QVBoxLayout(self)
@@ -117,6 +124,15 @@ class LobbyTab(QWidget):
     def request(self, method, route, callback, payload=None):
         request = QNetworkRequest(QUrl(f"{self.api}/{route}"))
         request.setTransferTimeout(8000)
+        request.setAttribute(
+            QNetworkRequest.Attribute.RedirectPolicyAttribute,
+            QNetworkRequest.RedirectPolicy.ManualRedirectPolicy,
+        )
+        if (
+            self.control_lobby and payload and payload.get("claim_id") and self.token
+            and (token := self.token())
+        ):
+            request.setRawHeader(b"Authorization", f"Bearer {token}".encode("ascii"))
         request.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, "LMFP/1.3.1")
         if method == b"GET":
             reply = self.network.get(request)
@@ -146,7 +162,7 @@ class LobbyTab(QWidget):
         if not self.visited:
             self.refresh_rooms()
         else:
-            self.sync_presence()
+            self.sync_lobby()
 
     def hideEvent(self, event):
         self.presence_timer.stop()
@@ -156,9 +172,14 @@ class LobbyTab(QWidget):
         if not self.api:
             return
         self.visited = True
-        self.refresh_button.setEnabled(False)
         self.status.setText("正在加载房间列表…")
-        self.request(b"GET", "rooms", self.show_rooms)
+        self.sync_lobby()
+
+    def sync_lobby(self):
+        if not self.rooms_pending:
+            self.rooms_pending = True
+            self.refresh_button.setEnabled(False)
+            self.request(b"GET", "rooms", self.show_rooms)
         self.sync_presence()
 
     def sync_presence(self):
@@ -183,6 +204,7 @@ class LobbyTab(QWidget):
         self.online.setText(f"在线人数: {count if type(count) is int else '—'}")
 
     def show_rooms(self, data):
+        self.rooms_pending = False
         self.refresh_button.setEnabled(True)
         rooms = data.get("rooms")
         if not isinstance(rooms, list):
@@ -193,10 +215,13 @@ class LobbyTab(QWidget):
         valid = [room for room in rooms if isinstance(room, dict)]
         for room in valid:
             self.rooms.addWidget(RoomCard(room))
-        self.status.setText(f"已加载 {len(valid)} 个房间" if valid else "当前暂无公开房间。")
+        if data.get("enabled") is False:
+            self.status.setText("公开联机大厅暂时关闭。")
+        else:
+            self.status.setText(f"已加载 {len(valid)} 个房间" if valid else "当前暂无公开房间。")
 
     def publish(self, room):
-        self.active_room = room
+        self.active_room = {**room, "publication_id": uuid4().hex}
         self.announcement = ""
         self.heartbeat.start()
         self.sync_publication()
@@ -213,7 +238,7 @@ class LobbyTab(QWidget):
         if self.last_sent is not None and self.last_sent is not room:
             previous, self.last_sent = self.last_sent, None
             method = b"DELETE"
-            payload = {key: previous[key] for key in ("node_id", "remote_port")}
+            payload = {key: previous[key] for key in ("node_id", "remote_port", "publication_id")}
         elif room is not None:
             self.last_sent = room
             method, payload = b"POST", room
@@ -224,7 +249,15 @@ class LobbyTab(QWidget):
         def finished(data):
             self.publication_pending = False
             if method == b"POST" and self.active_room is room:
-                if data.get("success") is True:
+                removed = data.get("code") == "room_unlisted"
+                if removed:
+                    self.active_room = self.last_sent = None
+                    self.heartbeat.stop()
+                    self.publication_removed.emit()
+                    status = "房间已被管理员下架，请手动重新发布。"
+                elif data.get("enabled") is False or data.get("code") == "lobby_closed":
+                    status = "公开联机大厅暂时关闭，开放后会重试。"
+                elif data.get("success") is True:
                     status = "房间已发布到联机大厅。"
                 else:
                     reason = data.get("message")
