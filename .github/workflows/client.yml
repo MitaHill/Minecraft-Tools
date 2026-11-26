@@ -8,6 +8,7 @@ on:
     tags:
       - '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[1-9]*'
       - 'dev-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[1-9]*'
+      - '!*-images'
     paths: ['client/**', 'launcher/**', 'control/**', 'node/**', '.github/workflows/client.yml']
   workflow_dispatch:
 

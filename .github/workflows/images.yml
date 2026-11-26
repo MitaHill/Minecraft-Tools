@@ -47,6 +47,15 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Resolve image version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=${GITHUB_REF_NAME#dev-}
+          tag=${tag%-images}
+          [[ "$tag" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[1-9][0-9]*$ ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Check Docker Hub configuration
@@ -65,27 +74,25 @@ jobs:
       - name: Build and push images
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
           NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
         run: |
           set -euo pipefail
-          tag=${TAG#dev-}
           for spec in minecrafttools-control:control minecrafttools-frp-agent:node; do
             image=${spec%%:*}
             context=${spec##*:}
             docker buildx build --push --platform linux/amd64,linux/arm64 \
-              -t "$NAMESPACE/$image:$tag" "$context"
+              -t "$NAMESPACE/$image:$TAG" "$context"
           done
       - name: Verify published platforms
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
           NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
         run: |
           set -euo pipefail
-          tag=${TAG#dev-}
           for image in minecrafttools-control minecrafttools-frp-agent; do
-            manifest=$(docker buildx imagetools inspect "$NAMESPACE/$image:$tag")
+            manifest=$(docker buildx imagetools inspect "$NAMESPACE/$image:$TAG")
             grep -q 'linux/amd64' <<<"$manifest" || { echo "::error::$image is missing linux/amd64"; exit 1; }
             grep -q 'linux/arm64' <<<"$manifest" || { echo "::error::$image is missing linux/arm64"; exit 1; }
           done

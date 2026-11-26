@@ -30,8 +30,8 @@ GitHub Actions 只构建并推送镜像，不连接服务器。部署按本文�
 
 ## 发布
 
-前提：镜像已经在 Docker Hub 上，标签是 `yyyy-mm-dd-n`（`.github/workflows/images.yml` 的 publish 任务）。
-不备份旧目录，不 `down -v`。
+前提：`.github/workflows/images.yml` 的 publish 任务已将 `yyyy-mm-dd-n` 镜像发布到 Docker Hub。只发布 Control Server 和 Agent 时，在已推送的提交上使用 `dev-yyyy-mm-dd-n-images` Git 标签。容器和桌面发布共用日期序号，每次发布使用新的序号。
+遇到数据库迁移时，先做 SQLite 一致性快照，并在独立副本上验证升级和回滚。保留现有数据卷。
 
 ```sh
 # 1. 仓库里的 compose 文件有改动时，先同步过去
@@ -46,6 +46,22 @@ ssh phoenix 'cd /opt/minecraft-tools/control-server && ./deploy.sh 2026-11-26-2'
 `deploy.sh` 做四件事：拉新标签、把 `CONTROL_IMAGE_TAG` 写进 `deploy.env`、`up -d --no-build`
 重建、等容器变成 `healthy`（最多 60 秒）。成功打印 `control is healthy on <tag>` 并清理悬空镜像；
 失败打印最近 50 行日志并把标签退回上一版。
+
+## 滚动更新 Agent
+
+先部署 Control Server。对每个节点记录并备份当前镜像覆盖文件，拉取同一版本的 `kindmitaishere/minecrafttools-frp-agent`，将覆盖文件里的 `agent` 与 `firewall` 指向该标签。沿用该节点的 Compose 项目名、环境和覆盖文件。以香港 dev 为例：
+
+```sh
+cd /srv/minecrafttools-hk-dev
+compose() {
+    docker compose --env-file deploy.env -p minecrafttools-hk-dev -f compose.yaml -f images.yaml "$@"
+}
+compose pull firewall agent
+compose up -d --no-build --no-deps --wait firewall
+compose up -d --no-build --no-deps agent
+```
+
+其他节点沿用各自的 Compose 参数，包括 TLS 覆盖文件。核对 Agent 在控制端重新上线并确认策略，确认 frps 容器的启动时间，再更新下一个节点。需要回退时恢复镜像覆盖文件并按相同顺序重建；回退到不支持 CIDR 的版本前，先解除生效的 CIDR 规则并确认同步。
 
 ## 每次必做的检查
 
