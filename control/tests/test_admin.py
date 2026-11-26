@@ -12,7 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 from support import seed_node
 
 from app.database import audit_logs
-from app.lobby import rooms
+from app.lobby import online_users, rooms
 from app.main import app
 from app.moderation import (
     acknowledge_policy,
@@ -624,3 +624,80 @@ class AdminTests(unittest.TestCase):
                 connection.execute(blacklist.update().values(expires_at=time() - 1))
             with app.state.database.connect() as connection:
                 self.assertIsNone(ip_block(connection, matched))
+
+    def test_online_statistics_lists_current_clients(self):
+        self.assertEqual(self.http.get("/api/admin/online").status_code, 401)
+        self.sign_in("reader")
+        now = time()
+        with app.state.database.begin() as connection:
+            connection.execute(
+                insert(online_users),
+                [
+                    {
+                        "client_ip": "192.0.2.10",
+                        "last_heartbeat": now,
+                        "first_heartbeat": now - 100,
+                        "lobby_heartbeat": now,
+                        "channel": "dev",
+                        "os_version": "macOS 14.5",
+                    },
+                    {
+                        "client_ip": "192.0.2.11",
+                        "last_heartbeat": now,
+                        "first_heartbeat": now - 200,
+                        "lobby_heartbeat": 0,
+                        "channel": None,
+                        "os_version": None,
+                    },
+                ],
+            )
+
+        response = self.http.get("/api/admin/online")
+        self.assertEqual(response.status_code, 200)
+        online = response.json()["online"]
+        self.assertEqual(
+            [row["client_ip"] for row in online], ["192.0.2.11", "192.0.2.10"]
+        )
+        self.assertEqual(
+            set(online[0]),
+            {
+                "client_ip",
+                "first_heartbeat",
+                "last_heartbeat",
+                "channel",
+                "os_version",
+            },
+        )
+        self.assertEqual(online[0]["channel"], None)
+        self.assertEqual(online[0]["os_version"], None)
+        self.assertEqual(online[1]["channel"], "dev")
+        self.assertEqual(online[1]["os_version"], "macOS 14.5")
+
+        with app.state.database.begin() as connection:
+            connection.execute(
+                online_users.update()
+                .where(online_users.c.client_ip == "192.0.2.11")
+                .values(last_heartbeat=now - 16)
+            )
+        online = self.http.get("/api/admin/online").json()["online"]
+        self.assertEqual([row["client_ip"] for row in online], ["192.0.2.10"])
+
+    def test_online_heartbeat_is_recorded_while_lobby_closed(self):
+        self.sign_in("reader")
+        with app.state.database.begin() as connection:
+            connection.execute(settings.update().values(lobby_enabled=False))
+        self.assertEqual(
+            self.http.post(
+                "/api/lobby/heartbeat",
+                json={"channel": "stable", "os_version": "Linux 6.8", "lobby": False},
+            ).json(),
+            {"success": True},
+        )
+        self.assertEqual(
+            self.http.get("/api/lobby/online").json(),
+            {"success": True, "online_count": 0},
+        )
+        online = self.http.get("/api/admin/online").json()["online"]
+        self.assertEqual(len(online), 1)
+        self.assertEqual(online[0]["channel"], "stable")
+        self.assertEqual(online[0]["os_version"], "Linux 6.8")

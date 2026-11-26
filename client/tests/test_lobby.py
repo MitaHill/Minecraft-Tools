@@ -12,17 +12,26 @@ class LobbyPresenceTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(["test_lobby", "-platform", "offscreen"])
 
     def test_open_lobby_registers_presence_before_reading_count(self):
-        with patch.dict("os.environ", {"MINECRAFTTOOLS_LOBBY_URL": "http://127.0.0.1/api/v1/lobby"}):
+        with patch.dict(
+            "os.environ",
+            {
+                "MINECRAFTTOOLS_LOBBY_URL": "http://127.0.0.1/api/v1/lobby",
+                "MINECRAFTTOOLS_BUILD_CHANNEL": "dev",
+            },
+        ):
             lobby = LobbyTab()
         self.addCleanup(lobby.close)
         lobby.request = Mock()
+        self.assertTrue(lobby.presence_timer.isActive())
 
         lobby.show()
 
         rooms, heartbeat = lobby.request.call_args_list
         self.assertEqual(rooms.args[:2], (b"GET", "rooms"))
         self.assertEqual(heartbeat.args[:2], (b"POST", "heartbeat"))
-        self.assertEqual(heartbeat.args[3], {})
+        self.assertEqual(heartbeat.args[3]["channel"], "dev")
+        self.assertEqual(heartbeat.args[3]["os_version"], lobby.os_version)
+        self.assertTrue(heartbeat.args[3]["lobby"])
 
         rooms.args[2]({"success": True, "rooms": []})
         heartbeat.args[2]({"success": True})
@@ -32,8 +41,18 @@ class LobbyPresenceTests(unittest.TestCase):
         self.assertEqual(lobby.online.text(), "在线人数: 1")
         self.assertEqual(lobby.status.text(), "当前暂无公开房间。")
 
-        self.assertTrue(lobby.presence_timer.isActive())
         lobby.hide()
+        self.assertTrue(lobby.presence_timer.isActive())
+
+        lobby.request = Mock()
+        lobby.sync_presence()
+        heartbeat = lobby.request.call_args
+        self.assertEqual(heartbeat.args[:2], (b"POST", "heartbeat"))
+        self.assertFalse(heartbeat.args[3]["lobby"])
+        heartbeat.args[2]({"success": True})
+        self.assertEqual(lobby.request.call_count, 1)
+
+        lobby.stop_presence()
         self.assertFalse(lobby.presence_timer.isActive())
 
     def test_publish_failure_shows_the_server_reason(self):

@@ -183,7 +183,7 @@ SQLite 使用 WAL，单进程写入。表设计：
 | `blocks` | `id`, `tunnel_id`, `node_id`, `port`, `reason`, `source`, `active`, `created_at`, `removed_at` |
 | `clients` | `install_id`, `version`, `channel`, `os`, `arch`, `last_seen` |
 | `rooms` | 沿用现有大厅字段和 `full_room_code` 主键，新增可空的 `tunnel_id` |
-| `online_users` | 大厅在线心跳，按客户端 IP 保存 `last_heartbeat` |
+| `online_users` | 客户端在线心跳；`client_ip` 主键，`last_heartbeat` 供管理台在线统计，`lobby_heartbeat` 仅大厅页可见时更新，`first_heartbeat` 为本次连续在线起点，`channel`/`os_version` 由客户端上报 |
 | `releases` | `channel`, `version`, `os`, `arch`, `url`, `size`, `sha256`, `signature` |
 | `diagnostics`（已实现） | `id`、接收时间 `received_at`、归一化的 `os` 和 `arch`、保留 Launcher 原字段的 `report` JSON |
 | `admins` / `audit_logs` | 管理台认证和操作审计 |
@@ -298,10 +298,10 @@ GET  /api/v1/lobby/online
 | `POST /api/lobby/rooms` | 接收原 `RoomCreate` JSON，以 `full_room_code` 创建房间或续期。成功响应含 `success: true` 和 `message`，业务拒绝继续返回客户端可识别的 `success: false` 和 `message`。 |
 | `DELETE /api/lobby/rooms` | 从 JSON 请求体读取整数 `node_id` 与 `remote_port`，按两者组合删除房间。重复删除保持幂等，成功响应保留 `success` 和 `message`。 |
 | `GET /api/lobby/rooms` | 返回 `{"success": true, "rooms": [...]}`。最多返回 100 条公开房间，按 `updated_at` 倒序，保留现有房间字段和脱敏后的 `host_ip`。 |
-| `POST /api/lobby/heartbeat` | 记录调用者的在线心跳，响应保留 `success`。 |
-| `GET /api/lobby/online` | 返回 `{"success": true, "online_count": n}`。沿用 15 秒在线窗口，`online_count` 保持整数。 |
+| `POST /api/lobby/heartbeat` | 记录调用者的在线心跳，响应保留 `success`。可选 JSON 字段 `channel`（`dev`/`stable`）、`os_version`（最长 128 字符）、`lobby`；空 body 或 `{}` 兼容旧客户端。 |
+| `GET /api/lobby/online` | 返回 `{"success": true, "online_count": n}`。沿用 15 秒在线窗口，只统计 `lobby_heartbeat` 有效的客户端，`online_count` 保持整数。 |
 
-旧客户端的房间键为 `<remote_port>_<node_id>`，其中 `node_id` 是整数。Qt 客户端每 5 秒用同一份 `POST /rooms` 请求续期房间。打开大厅时，客户端立即发送 `POST /heartbeat`，随后每 5 秒续报并刷新在线人数。离开大厅后停止续报，在线记录按来源 IP 去重并在 15 秒后过期。已登记的地址和端口唯一匹配正在运行的隧道时，发布记录关联该隧道。当前兼容接口通过 `CONTROL_LOBBY_TARGETS` 限制可探测的目标，删除操作同时核对房间键和来源 IP。上线前需要核对实际反向代理的可信地址与旧客户端换网行为。
+旧客户端的房间键为 `<remote_port>_<node_id>`，其中 `node_id` 是整数。Qt 客户端每 5 秒用同一份 `POST /rooms` 请求续期房间。打开大厅时，客户端立即发送 `POST /heartbeat`，随后每 5 秒续报并刷新在线人数。新版客户端从启动起持续发送心跳，用 `lobby` 字段标记当前是否在大厅页：`last_heartbeat` 供管理台在线统计，`lobby_heartbeat` 只在 `lobby=true` 时更新，因此 `GET /api/lobby/online` 仍只统计打开过大厅页的客户端。旧客户端不传字段时按 `lobby=true` 处理，仍只在大厅页可见时出现在在线统计中。在线记录按来源 IP 去重并在 15 秒后过期；首次心跳在断线超过 15 秒后重新计时。已登记的地址和端口唯一匹配正在运行的隧道时，发布记录关联该隧道。当前兼容接口通过 `CONTROL_LOBBY_TARGETS` 限制可探测的目标，删除操作同时核对房间键和来源 IP。上线前需要核对实际反向代理的可信地址与旧客户端换网行为。
 
 ### 6.4 节点协议
 
@@ -350,6 +350,7 @@ GET      /api/admin/diagnostics
 GET      /api/admin/lobby/rooms
 PATCH    /api/admin/lobby
 DELETE   /api/admin/lobby/rooms/{listing_id}
+GET      /api/admin/online
 GET      /api/admin/audit
 ```
 

@@ -118,7 +118,9 @@ class MappingWindow(QWidget):
         self.mapping_log.setReadOnly(True)
         self.mapping_log.setMaximumBlockCount(80)
         self.tabs = QTabWidget()
-        self.lobby = LobbyTab(self.control.base, lambda: self.control.token)
+        self.lobby = LobbyTab(
+            self.control.base, lambda: self.control.token, self.control.channel
+        )
         self.lobby.publication_status.connect(self.append_log)
         self.lobby.publication_removed.connect(self.room_was_removed)
         self.tabs.addTab(self.mapping_page(), "映射")
@@ -465,6 +467,7 @@ class MappingWindow(QWidget):
                 self.closing = False
                 event.ignore()
                 return
+        self.lobby.stop_presence()
         event.accept()
 
 

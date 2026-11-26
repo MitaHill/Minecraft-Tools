@@ -1,4 +1,4 @@
-import { Connection, Grid, House, Lock, Monitor, Setting } from '@element-plus/icons-vue'
+import { Connection, DataLine, Grid, House, Lock, Monitor, Setting } from '@element-plus/icons-vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { checkSession } from './session'
 import OverviewView from './views/OverviewView.vue'
@@ -9,6 +9,7 @@ export const navigation = [
   { name: 'overview', label: '概览', icon: Grid },
   { name: 'nodes', label: '节点', icon: Monitor },
   { name: 'tunnels', label: '隧道', icon: Connection },
+  { name: 'online', label: '在线统计', icon: DataLine },
   { name: 'blacklist', label: '黑名单', icon: Lock },
   { name: 'lobby', label: '公开联机大厅', icon: House },
   { name: 'settings', label: '设定', icon: Setting },
@@ -33,6 +34,10 @@ export const router = createRouter({
       name: 'tunnels',
       component: TunnelsView,
       meta: { title: '隧道', protected: true },
+    },
+    {
+      path: '/online', name: 'online', component: () => import('./views/OnlineView.vue'),
+      meta: { title: '在线统计', protected: true },
     },
     {
       path: '/blacklist', name: 'blacklist', component: () => import('./views/BlacklistView.vue'),

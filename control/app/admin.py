@@ -23,7 +23,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from .database import metadata, record_admin_action
 from .ip_rules import canonical_ip, canonical_rule
-from .lobby import live_rooms, rooms
+from .lobby import live_online_users, live_rooms, rooms
 from .moderation import (
     active_blacklist,
     blacklist,
@@ -748,6 +748,12 @@ def expire_blacklist_rule(address, request, account):
         if removed.rowcount:
             connection.execute(update(settings).values(blacklist_revision=settings.c.blacklist_revision + 1))
             record_admin_action(connection, account.username, "blacklist.remove", address)
+
+
+@router.get("/online")
+def list_online(request: Request, _account: SignedIn):
+    with request.app.state.database.connect() as connection:
+        return {"online": live_online_users(connection)}
 
 
 @router.get("/lobby/rooms")

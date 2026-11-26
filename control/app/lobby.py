@@ -7,7 +7,7 @@ from ipaddress import ip_address
 from pathlib import Path
 from sqlite3 import SQLITE_CONSTRAINT_UNIQUE
 from time import time
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -74,11 +74,22 @@ online_users = Table(
     metadata,
     Column("client_ip", String, primary_key=True),
     Column("last_heartbeat", Float, nullable=False),
+    Column("first_heartbeat", Float, nullable=False, server_default="0"),
+    Column("lobby_heartbeat", Float, nullable=False, server_default="0"),
+    Column("channel", String, nullable=True),
+    Column("os_version", String, nullable=True),
 )
 Index("ix_online_users_last_heartbeat", online_users.c.last_heartbeat)
 
 Port = Annotated[int, Field(ge=1, le=65535)]
 Identifier = Annotated[int, Field(ge=0, le=2**63 - 1)]
+
+
+class PresenceHeartbeat(BaseModel):
+    channel: Literal["dev", "stable"] | None = None
+    os_version: str | None = Field(default=None, max_length=128)
+    # 旧客户端不带 body；缺省仍按大厅心跳处理。
+    lobby: bool = True
 
 
 class RoomKey(BaseModel):
@@ -419,20 +430,57 @@ def list_rooms(request: Request):
 
 
 @router.post("/heartbeat")
-def heartbeat(request: Request):
+def heartbeat(request: Request, payload: PresenceHeartbeat | None = None):
     now = time()
+    profile = payload or PresenceHeartbeat()
+    os_version = profile.os_version.strip() if profile.os_version else None
     statement = insert(online_users).values(
-        client_ip=client_ip(request), last_heartbeat=now
+        client_ip=client_ip(request),
+        last_heartbeat=now,
+        first_heartbeat=now,
+        lobby_heartbeat=now if profile.lobby else 0.0,
+        channel=profile.channel,
+        os_version=os_version or None,
     )
+    changes = {
+        "last_heartbeat": now,
+        "first_heartbeat": case(
+            (online_users.c.last_heartbeat < now - ONLINE_LIFETIME, now),
+            else_=online_users.c.first_heartbeat,
+        ),
+        "channel": func.coalesce(statement.excluded.channel, online_users.c.channel),
+        "os_version": func.coalesce(
+            statement.excluded.os_version, online_users.c.os_version
+        ),
+    }
+    if profile.lobby:
+        changes["lobby_heartbeat"] = now
     statement = statement.on_conflict_do_update(
-        index_elements=[online_users.c.client_ip],
-        set_={"last_heartbeat": now},
+        index_elements=[online_users.c.client_ip], set_=changes
     )
     with request.app.state.database.begin() as connection:
-        lock_settings(connection)
-        if connection.execute(select(settings.c.lobby_enabled)).scalar_one():
-            connection.execute(statement)
+        connection.execute(statement)
     return {"success": True}
+
+
+def live_online_users(connection, now=None):
+    now = time() if now is None else now
+    first_heartbeat = case(
+        (online_users.c.first_heartbeat > 0, online_users.c.first_heartbeat),
+        else_=online_users.c.last_heartbeat,
+    ).label("first_heartbeat")
+    query = (
+        select(
+            online_users.c.client_ip,
+            first_heartbeat,
+            online_users.c.last_heartbeat,
+            online_users.c.channel,
+            online_users.c.os_version,
+        )
+        .where(online_users.c.last_heartbeat >= now - ONLINE_LIFETIME)
+        .order_by(first_heartbeat, online_users.c.client_ip)
+    )
+    return list(map(dict, connection.execute(query).mappings()))
 
 
 @router.get("/online")
@@ -441,7 +489,7 @@ def online(request: Request):
         select(func.count())
         .select_from(online_users)
         .where(
-            online_users.c.last_heartbeat >= time() - ONLINE_LIFETIME,
+            online_users.c.lobby_heartbeat >= time() - ONLINE_LIFETIME,
         )
     )
     with request.app.state.database.connect() as connection:

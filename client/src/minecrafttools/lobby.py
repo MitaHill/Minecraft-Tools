@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 from hashlib import sha256
 from uuid import uuid4
 
@@ -72,7 +73,7 @@ class LobbyTab(QWidget):
     publication_status = Signal(str)
     publication_removed = Signal()
 
-    def __init__(self, control: str = "", token=None):
+    def __init__(self, control: str = "", token=None, channel: str | None = None):
         super().__init__()
         self.api = os.environ.get(
             "MINECRAFTTOOLS_LOBBY_URL", os.environ.get("MINECRAFTFRP_LOBBY_URL", f"{control}/api/v1/lobby" if control else "")
@@ -82,6 +83,10 @@ class LobbyTab(QWidget):
             f"{control}/api/v1/lobby", f"{control}/api/lobby"
         )
         self.token = token
+        self.channel = channel if channel in ("dev", "stable") else (
+            "dev" if os.environ.get("MINECRAFTTOOLS_BUILD_CHANNEL") == "dev" else "stable"
+        )
+        self.os_version = platform.platform(terse=True)[:128] or "unknown"
         self.active_room = None
         self.last_sent = None
         self.publication_pending = False
@@ -91,7 +96,7 @@ class LobbyTab(QWidget):
         self.heartbeat.timeout.connect(self.sync_publication)
         self.presence_timer = QTimer(self)
         self.presence_timer.setInterval(5000)
-        self.presence_timer.timeout.connect(self.sync_lobby)
+        self.presence_timer.timeout.connect(self.presence_tick)
         self.presence_pending = False
         self.rooms_pending = False
         self.visited = False
@@ -120,6 +125,7 @@ class LobbyTab(QWidget):
         footer.addWidget(self.status, 1)
         footer.addWidget(self.online)
         layout.addLayout(footer)
+        self.start_presence()
 
     def request(self, method, route, callback, payload=None):
         request = QNetworkRequest(QUrl(f"{self.api}/{route}"))
@@ -158,15 +164,24 @@ class LobbyTab(QWidget):
         super().showEvent(event)
         if not self.api:
             return
-        self.presence_timer.start()
+        self.start_presence()
         if not self.visited:
             self.refresh_rooms()
         else:
             self.sync_lobby()
 
-    def hideEvent(self, event):
+    def start_presence(self):
+        if self.api and not self.presence_timer.isActive():
+            self.presence_timer.start()
+
+    def stop_presence(self):
         self.presence_timer.stop()
-        super().hideEvent(event)
+
+    def presence_tick(self):
+        if self.isVisible():
+            self.sync_lobby()
+        else:
+            self.sync_presence()
 
     def refresh_rooms(self):
         if not self.api:
@@ -183,7 +198,7 @@ class LobbyTab(QWidget):
         self.sync_presence()
 
     def sync_presence(self):
-        if self.presence_pending:
+        if not self.api or self.presence_pending:
             return
         self.presence_pending = True
 
@@ -192,12 +207,25 @@ class LobbyTab(QWidget):
             self.show_online(data)
 
         def registered(data):
-            if data.get("success") is True and self.presence_timer.isActive():
+            if (
+                data.get("success") is True
+                and self.isVisible()
+                and self.presence_timer.isActive()
+            ):
                 self.request(b"GET", "online", counted)
             else:
                 counted({})
 
-        self.request(b"POST", "heartbeat", registered, {})
+        self.request(
+            b"POST",
+            "heartbeat",
+            registered,
+            {
+                "channel": self.channel,
+                "os_version": self.os_version,
+                "lobby": self.isVisible(),
+            },
+        )
 
     def show_online(self, data):
         count = data.get("online_count")

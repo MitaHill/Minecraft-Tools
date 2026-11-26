@@ -20,7 +20,7 @@ uv run --project control --locked --python 3.12 \
 
 ## 管理台前端
 
-前端位于 `control/web/`，使用 Vue 3、Vue Router、TypeScript、Vite 和 Element Plus。登录后可查看实时隧道、节点、黑名单和公开联机大厅。节点创建、编辑和删除限超级管理员，封禁、拉黑、解除及大厅管理限超级管理员和运维。超级管理员可通过管理 API 创建节点，返回的新节点密钥仅出现一次。
+前端位于 `control/web/`，使用 Vue 3、Vue Router、TypeScript、Vite 和 Element Plus。登录后可查看实时隧道、节点、在线统计、黑名单和公开联机大厅。节点创建、编辑和删除限超级管理员，封禁、拉黑、解除及大厅管理限超级管理员和运维。超级管理员可通过管理 API 创建节点，返回的新节点密钥仅出现一次。
 
 先按上文启动控制端，再在仓库根目录执行以下命令。需要 Node.js 22.12 或更高版本。
 

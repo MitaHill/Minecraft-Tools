@@ -350,10 +350,69 @@ class LobbyTests(unittest.TestCase):
             self.http.get(route).json(), {"success": True, "online_count": 1}
         )
         with closing(sqlite3.connect(self.database)) as db, db:
-            db.execute("UPDATE online_users SET last_heartbeat = ?", (time() - 16,))
+            first, lobby = db.execute(
+                "SELECT first_heartbeat, lobby_heartbeat FROM online_users"
+            ).fetchone()
+            self.assertGreater(first, 0)
+            self.assertLessEqual(first, lobby)
+
+        self.assertEqual(
+            self.http.post(
+                "/api/lobby/heartbeat",
+                json={"channel": "dev", "os_version": " macOS 14.5 ", "lobby": False},
+            ).json(),
+            {"success": True},
+        )
+        with closing(sqlite3.connect(self.database)) as db, db:
+            first_after, lobby_after, channel, os_version = db.execute(
+                "SELECT first_heartbeat, lobby_heartbeat, channel, os_version "
+                "FROM online_users"
+            ).fetchone()
+            self.assertEqual(first_after, first)
+            self.assertEqual(lobby_after, lobby)
+            self.assertEqual(channel, "dev")
+            self.assertEqual(os_version, "macOS 14.5")
+        self.assertEqual(
+            self.http.get(route).json(), {"success": True, "online_count": 1}
+        )
+
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute(
+                "UPDATE online_users SET last_heartbeat = ?, lobby_heartbeat = ?",
+                (time() - 16, time() - 16),
+            )
         self.assertEqual(
             self.http.get(route).json(), {"success": True, "online_count": 0}
         )
+
+    def test_heartbeat_accepts_legacy_body_and_resets_first_heartbeat_after_gap(self):
+        self.assertEqual(self.http.post("/api/lobby/heartbeat").status_code, 200)
+        stale = time() - 20
+        with closing(sqlite3.connect(self.database)) as db, db:
+            first = db.execute(
+                "SELECT first_heartbeat FROM online_users"
+            ).fetchone()[0]
+            db.execute(
+                "UPDATE online_users SET last_heartbeat = ?, lobby_heartbeat = ?",
+                (stale, stale),
+            )
+
+        self.assertEqual(
+            self.http.post(
+                "/api/lobby/heartbeat",
+                json={"channel": "stable", "os_version": "Windows 11", "lobby": False},
+            ).json(),
+            {"success": True},
+        )
+        with closing(sqlite3.connect(self.database)) as db, db:
+            row = db.execute(
+                "SELECT first_heartbeat, last_heartbeat, lobby_heartbeat, channel, os_version "
+                "FROM online_users"
+            ).fetchone()
+        self.assertGreater(row[0], first)
+        self.assertGreater(row[1], stale)
+        self.assertEqual(row[2], stale)
+        self.assertEqual(row[3:], ("stable", "Windows 11"))
 
 
 class MigrationTests(unittest.TestCase):
@@ -396,6 +455,36 @@ class MigrationTests(unittest.TestCase):
                     ("b", 0, 31000, 31000),
                 ],
             )
+
+    def test_online_presence_columns_backfill_existing_heartbeats(self):
+        home = Path(self.enterContext(TemporaryDirectory()))
+        engine = create_engine(URL.create("sqlite", database=str(home / "control.db")))
+        self.addCleanup(engine.dispose)
+        migration = Config()
+        migration.set_main_option("script_location", "app:migrations")
+        with engine.begin() as connection:
+            migration.attributes["connection"] = connection
+            command.upgrade(migration, "0012_security_settings")
+            connection.exec_driver_sql(
+                "INSERT INTO online_users (client_ip, last_heartbeat) VALUES (?, ?)",
+                ("192.0.2.10", 123.0),
+            )
+            command.upgrade(migration, "0013_online_presence")
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(online_users)"
+                )
+            }
+            self.assertTrue(
+                {"first_heartbeat", "lobby_heartbeat", "channel", "os_version"}
+                <= columns
+            )
+            row = connection.exec_driver_sql(
+                "SELECT first_heartbeat, lobby_heartbeat, channel, os_version "
+                "FROM online_users"
+            ).one()
+            self.assertEqual(row, (123.0, 123.0, None, None))
 
     def test_upgrade_preserves_an_existing_diagnostics_database(self):
         home = Path(self.enterContext(TemporaryDirectory()))
@@ -444,5 +533,5 @@ class MigrationTests(unittest.TestCase):
                     report = connection.exec_driver_sql(
                         "SELECT report FROM diagnostics"
                     ).scalar_one()
-                self.assertEqual(revision, "0012_security_settings")
+                self.assertEqual(revision, "0013_online_presence")
                 self.assertEqual(json.loads(report), {"stage": "ready"})
