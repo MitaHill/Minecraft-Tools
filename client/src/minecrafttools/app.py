@@ -60,7 +60,7 @@ class MappingWindow(QWidget):
     def __init__(self, frpc: Path, frpc_version: tuple[int, int, int] | None):
         super().__init__()
         self.setWindowTitle("MinecraftTools")
-        self.resize(400, 550)
+        self.resize(378, 550)
         self.frpc = frpc
         self.frpc_version = frpc_version
         self.catalog_ready = False
@@ -141,6 +141,7 @@ class MappingWindow(QWidget):
         layout.addLayout(servers)
 
         ports = QFormLayout()
+        ports.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         ports.addRow("输入本地端口:", self.local_port)
         layout.addLayout(ports)
         self.public_room = QGroupBox("发布到联机大厅")
@@ -148,6 +149,7 @@ class MappingWindow(QWidget):
         self.public_room.setChecked(False)
         self.public_room.setEnabled(bool(self.lobby.api))
         room = QFormLayout(self.public_room)
+        room.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.room_name = QLineEdit()
         self.room_name.setMaxLength(50)
         self.room_name.setPlaceholderText("我的 Minecraft 服务器")
@@ -173,6 +175,7 @@ class MappingWindow(QWidget):
         layout.addWidget(QLabel("运行日志:"))
         layout.addWidget(self.mapping_log, 1)
         address = QFormLayout()
+        address.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         address.addRow("映射地址:", self.link)
         layout.addLayout(address)
         layout.addWidget(self.status)
@@ -498,7 +501,7 @@ def main() -> int:
     app = QApplication([sys.argv[0]])
     app.setOrganizationName("MitaHill")
     app.setApplicationName("MinecraftTools")
-    app.setWindowIcon(QIcon(str(resources / "logo.ico")))
+    app.setWindowIcon(QIcon(str(resources / "logo-macos.png")))
     artwork = QPixmap(str(resources / "MinecraftToolsStartupLogo.png"))
     frpc_version = read_frpc_version(frpc)
     if options.smoke_test and (artwork.isNull() or frpc_version is None):

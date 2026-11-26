@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 NATIVE = Path(__file__).with_name("native")
+ASSETS = Path(__file__).resolve().parents[1] / "src" / "minecrafttools"
 ASSET = re.compile(r"MinecraftTools-update-([0-9]{4}-[0-9]{2}-[0-9]{2}-[1-9][0-9]*)-(darwin|linux|windows)-(amd64|arm64)\.tar\.gz")
 
 
@@ -44,6 +45,7 @@ def macos(stage: Path, output: Path, options, version: str) -> None:
     shutil.copyfile(options.launcher, launcher)
     launcher.chmod(0o755)
     bootstrap(options.update, contents / "Resources", version, options.channel)
+    shutil.copyfile(ASSETS / "logo-macos.icns", contents / "Resources" / "MinecraftTools.icns")
     with (contents / "Info.plist").open("wb") as info:
         plistlib.dump({
             "CFBundleIdentifier": "com.mitahill.minecrafttools.launcher",
@@ -51,6 +53,7 @@ def macos(stage: Path, output: Path, options, version: str) -> None:
             "CFBundleDisplayName": "MinecraftTools",
             "CFBundlePackageType": "APPL",
             "CFBundleExecutable": "MinecraftToolsLauncher",
+            "CFBundleIconFile": "MinecraftTools.icns",
             "CFBundleVersion": msi_version(version),
             "CFBundleShortVersionString": msi_version(version),
             "NSHighResolutionCapable": True,
@@ -78,6 +81,7 @@ def windows(stage: Path, output: Path, options, version: str, arch: str) -> None
 
 def linux(stage: Path, output: Path, options, version: str) -> None:
     shutil.copyfile(options.launcher, stage / "MinecraftToolsLauncher")
+    shutil.copyfile(ASSETS / "logo-macos.png", stage / "logo.png")
     bootstrap(options.update, stage, version, options.channel)
     for name in ("MinecraftToolsLauncher", "install.sh", "uninstall.sh"):
         executable = stage / name

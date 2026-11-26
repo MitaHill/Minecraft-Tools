@@ -50,15 +50,16 @@ def main():
         "--distpath", str(dist), "--workpath", str(work), "--specpath", str(work),
         "--add-binary", f"{frpc}:minecrafttools/bin",
         "--add-data", f"{frpc.with_name('frp-LICENSE')}:minecrafttools",
-        "--add-data", f"{source / 'logo.ico'}:minecrafttools",
+        "--add-data", f"{source / 'logo-macos.png'}:minecrafttools",
         "--add-data", f"{source / 'MinecraftToolsStartupLogo.png'}:minecrafttools",
     ]
     if system in {"windows", "darwin"}:
         cmd.append("--windowed")
     if system == "windows":
-        cmd.extend(["--icon", str(source / "logo.ico")])
+        cmd.extend(["--icon", str(source / "logo-unified.ico")])
     if system == "darwin":
-        cmd.extend(["--osx-bundle-identifier", "com.mitahill.minecrafttools"])
+        cmd.extend(["--osx-bundle-identifier", "com.mitahill.minecrafttools",
+                    "--icon", str(source / "logo-macos.icns")])
     cmd.append(str(source / "__main__.py"))
     subprocess.run(cmd, check=True, cwd=CLIENT)
 

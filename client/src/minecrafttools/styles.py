@@ -46,6 +46,9 @@ QTabBar::tab:selected {
 QTabBar::tab:hover {
     background: #f0f0f0;
 }
+QTabWidget::tab-bar {
+    alignment: left;
+}
 QTabWidget::pane {
     background: #f8f9fa;
 }
@@ -143,6 +146,9 @@ QTabBar::tab:selected {
 }
 QTabBar::tab:hover {
     background: #555555;
+}
+QTabWidget::tab-bar {
+    alignment: left;
 }
 QTabWidget::pane {
     background: #1e1e1e;

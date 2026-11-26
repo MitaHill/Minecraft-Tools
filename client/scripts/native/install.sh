@@ -10,6 +10,7 @@ applications_dir=${XDG_DATA_HOME:-$HOME/.local/share}/applications
 mkdir -p "$install_dir" "$bin_dir" "$applications_dir"
 
 install -m 0755 "$source_dir/MinecraftToolsLauncher" "$install_dir/MinecraftToolsLauncher"
+install -m 0644 "$source_dir/logo.png" "$install_dir/logo.png"
 install -m 0644 "$source_dir/bootstrap.json" "$install_dir/bootstrap.json"
 install -m 0644 "$source_dir/bootstrap.tar.gz" "$install_dir/bootstrap.tar.gz"
 install -m 0755 "$source_dir/uninstall.sh" "$install_dir/uninstall.sh"
@@ -21,6 +22,7 @@ cat > "$applications_dir/minecrafttools.desktop" <<EOF
 Type=Application
 Name=MinecraftTools
 Exec="$install_dir/MinecraftToolsLauncher"
+Icon=$install_dir/logo.png
 Terminal=false
 Categories=Game;
 EOF

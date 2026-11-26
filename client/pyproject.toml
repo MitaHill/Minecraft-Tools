@@ -12,4 +12,4 @@ dependencies = ["PySide6-Essentials==6.12.0"]
 build = ["PyInstaller==6.22.3"]
 
 [tool.setuptools.package-data]
-minecrafttools = ["logo.ico", "MinecraftToolsStartupLogo.png"]
+minecrafttools = ["logo-macos.png", "MinecraftToolsStartupLogo.png"]

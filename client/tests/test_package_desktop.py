@@ -1,9 +1,15 @@
 import hashlib
 import json
+import os
+import plistlib
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -57,6 +63,43 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(metadata["size"], len(b"payload"))
             self.assertEqual(metadata["sha256"], hashlib.sha256(b"payload").hexdigest())
             self.assertEqual((resources / "bootstrap.tar.gz").read_bytes(), b"payload")
+
+class DesktopIconTests(unittest.TestCase):
+    def test_macos_bundle_contains_declared_icon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "stage"
+            stage.mkdir()
+            launcher = root / "launcher"
+            launcher.write_bytes(b"launcher")
+            update = root / "update.tar.gz"
+            update.write_bytes(b"update")
+            options = SimpleNamespace(launcher=launcher, update=update, channel="dev",
+                                      mac_identity="-", mac_notary_profile=None)
+            with patch.object(package_desktop.subprocess, "run"):
+                package_desktop.macos(stage, root / "installer.dmg", options, "2026-11-25-1")
+            contents = stage / "MinecraftTools.app" / "Contents"
+            with (contents / "Info.plist").open("rb") as info:
+                icon = plistlib.load(info)["CFBundleIconFile"]
+            self.assertEqual((contents / "Resources" / icon).read_bytes(),
+                             (package_desktop.ASSETS / "logo-macos.icns").read_bytes())
+
+    def test_linux_installer_registers_icon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "stage"
+            stage.mkdir()
+            for name in ("MinecraftToolsLauncher", "bootstrap.json", "bootstrap.tar.gz"):
+                (stage / name).write_bytes(b"fixture")
+            shutil.copyfile(package_desktop.ASSETS / "logo-macos.png", stage / "logo.png")
+            shutil.copyfile(package_desktop.NATIVE / "install.sh", stage / "install.sh")
+            shutil.copyfile(package_desktop.NATIVE / "uninstall.sh", stage / "uninstall.sh")
+            env = {**os.environ, "XDG_DATA_HOME": str(root / "data"), "XDG_BIN_HOME": str(root / "bin")}
+            subprocess.run(["sh", str(stage / "install.sh")], env=env, check=True, capture_output=True)
+            desktop = (root / "data/applications/minecrafttools.desktop").read_text()
+            icon = root / "data/minecrafttools/logo.png"
+            self.assertIn(f"Icon={icon}", desktop)
+            self.assertEqual(icon.read_bytes(), (package_desktop.ASSETS / "logo-macos.png").read_bytes())
 
 
 if __name__ == "__main__":
