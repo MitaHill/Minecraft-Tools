@@ -29,6 +29,13 @@ func (policy portRangePolicy) effectiveRanges() [][2]int {
 	return [][2]int{{policy.Start, policy.End}}
 }
 
+func sameRangePolicy(previous, next portRangePolicy) bool {
+	return previous.Revision == next.Revision &&
+		previous.Start == next.Start &&
+		previous.End == next.End &&
+		slices.Equal(previous.Ranges, next.Ranges)
+}
+
 func portInRanges(ranges [][2]int, port int) bool {
 	return slices.ContainsFunc(ranges, func(item [2]int) bool {
 		return item[0] <= port && port <= item[1]
@@ -156,7 +163,7 @@ func (agent *Agent) applyRange(ctx context.Context, policy portRangePolicy, port
 	if !inDeployedRange(ports, ranges) {
 		return errors.New("范围超出 frps 与 Docker 已部署的端口")
 	}
-	if previous := agent.policy.Range; previous != nil && previous.Revision == policy.Revision {
+	if previous := agent.policy.Range; previous != nil && sameRangePolicy(*previous, policy) {
 		agent.policyReady = true
 		return nil
 	}

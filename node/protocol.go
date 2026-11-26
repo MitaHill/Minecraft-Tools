@@ -184,8 +184,11 @@ func (control *ControlConnection) session(ctx context.Context, snapshot func(con
 				return err
 			}
 		}
-		if current := policy.Range; current != nil && current.Revision != rangeRevision {
+		if current := policy.Range; current != nil {
 			err := agent.applyRange(ctx, *current, ports)
+			if current.Revision == rangeRevision {
+				return nil
+			}
 			if err == nil {
 				rangeRevision = current.Revision
 			}

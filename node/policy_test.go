@@ -77,3 +77,19 @@ func TestLoadPolicyAcceptsLegacyCachedRange(t *testing.T) {
 		t.Fatalf("unexpected ranges: %#v", got)
 	}
 }
+
+func TestSameRangePolicyDetectsAddedRanges(t *testing.T) {
+	legacy := portRangePolicy{Revision: 0, Start: 33001, End: 33002}
+	withRanges := portRangePolicy{
+		Revision: 0, Start: 33001, End: 33002, Ranges: [][2]int{{33001, 33002}},
+	}
+	if sameRangePolicy(legacy, legacy) != true {
+		t.Fatal("identical policies should match")
+	}
+	if sameRangePolicy(legacy, withRanges) {
+		t.Fatal("policy gaining ranges must be re-applied")
+	}
+	if !sameRangePolicy(withRanges, withRanges) {
+		t.Fatal("identical multi-range policies should match")
+	}
+}
