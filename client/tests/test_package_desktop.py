@@ -84,6 +84,7 @@ class DesktopIconTests(unittest.TestCase):
             self.assertEqual((contents / "Resources" / icon).read_bytes(),
                              (package_desktop.ASSETS / "logo-macos.icns").read_bytes())
 
+    @unittest.skipIf(sys.platform == "win32", "Linux installer requires a Unix environment")
     def test_linux_installer_registers_icon(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
