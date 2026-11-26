@@ -74,26 +74,37 @@ onMounted(load)
   <section v-else class="settings-panel" aria-labelledby="security-settings">
     <div>
       <h2 id="security-settings">自动拉黑未授权隧道</h2>
-      <p class="cell-note">
-        绕过客户端直接连节点、且没有有效预约的隧道会被封禁。以下条件决定何时把来源 IP 加入黑名单。
-      </p>
+      <p class="cell-note">绕过客户端直接连节点、且没有有效预约的隧道会被封禁。</p>
+      <p class="cell-note">以下条件决定何时把来源 IP 加入黑名单。</p>
     </div>
     <label class="checkbox-field">
       <input v-model="form.auto_ban_enabled" type="checkbox" :disabled="busy || !canEdit">
       启用自动拉黑
     </label>
     <div class="settings-grid">
-      <label>触发条数
+      <label class="settings-field">
+        <span class="field-heading">
+          <span>触发条数</span>
+          <small class="field-hint">1–20 条</small>
+        </span>
+        <small class="field-note">同一 IP 在统计窗口内累计达到这个条数后触发自动拉黑。</small>
         <input v-model.number="form.auto_ban_attempts" type="number" min="1" max="20" step="1" :disabled="busy || !canEdit">
-        <small class="cell-note">1–20 条</small>
       </label>
-      <label>统计窗口
+      <label class="settings-field">
+        <span class="field-heading">
+          <span>统计窗口</span>
+          <small class="field-hint">1–1440 分钟</small>
+        </span>
+        <small class="field-note">从当前时间往前统计的时长，超出窗口的无预约记录不再计入。</small>
         <input v-model.number="form.auto_ban_window_minutes" type="number" min="1" max="1440" step="1" :disabled="busy || !canEdit">
-        <small class="cell-note">分钟，1–1440</small>
       </label>
-      <label>封禁时长
+      <label class="settings-field">
+        <span class="field-heading">
+          <span>封禁时长</span>
+          <small class="field-hint">1–720 小时（最长 30 天）</small>
+        </span>
+        <small class="field-note">自动加入黑名单后保持的时长，到期后自动解除。</small>
         <input v-model.number="form.auto_ban_hours" type="number" min="1" max="720" step="1" :disabled="busy || !canEdit">
-        <small class="cell-note">小时，1–720（最长 30 天）</small>
       </label>
     </div>
     <label class="checkbox-field">
@@ -118,11 +129,23 @@ onMounted(load)
 
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+.settings-field { display: grid; gap: 6px; }
+
+.field-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   gap: 12px;
 }
 
-.settings-grid label { display: grid; gap: 5px; }
+.field-hint,
+.field-note { color: var(--muted); }
+
+.field-note { line-height: 1.45; }
 
 .settings-panel input[type='number'] {
   width: 100%;
@@ -138,7 +161,4 @@ onMounted(load)
 
 .checkbox-field input { width: auto; }
 
-@media (max-width: 720px) {
-  .settings-grid { grid-template-columns: 1fr; }
-}
 </style>
