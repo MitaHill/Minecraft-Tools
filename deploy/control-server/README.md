@@ -30,7 +30,7 @@ GitHub Actions 只构建并推送镜像，不连接服务器。部署按本文�
 
 ## 发布
 
-前提：`.github/workflows/images.yml` 的 publish 任务已将 `yyyy-mm-dd-n` 镜像发布到 Docker Hub。只发布 Control Server 和 Agent 时，在已推送的提交上使用 `dev-yyyy-mm-dd-n-images` Git 标签。容器和桌面发布共用日期序号，每次发布使用新的序号。
+前提：`.github/workflows/images.yml` 的 publish 任务已将 `yyyy-mm-dd-n` 镜像发布到 Docker Hub（推送前会先跑两个组件的单元测试）。只发布 Control Server 和 Agent 时，在已推送的提交上使用 `dev-yyyy-mm-dd-n-images` Git 标签。容器和桌面发布共用日期序号，每次发布使用新的序号。
 遇到数据库迁移时，先做 SQLite 一致性快照，并在独立副本上验证升级和回滚。保留现有数据卷。
 
 ```sh

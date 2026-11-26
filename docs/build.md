@@ -26,9 +26,11 @@
 
 GitHub Actions 在 Windows、macOS 和 Linux 上分别构建 amd64 和 arm64。每轮构建选定同一个上游正式版 `frpc`，下载时校验 SHA-256。Runner 是一次性的，工作流仍直接写 `client/build/frp` 和 `client/dist/artifacts`，不走 `dev.sh`。
 
-`client.yml` 分三段：
+工作流按组件拆成两个。`Client build`（`client.yml`）只在 `client/**`、`launcher/**` 和自身变更时触发，负责桌面端与 Launcher；`Server build`（`images.yml`）在 `control/**`、`node/**` 变更时测试 Control Server 与 FRP Agent，并构建镜像。GitHub 不按路径过滤标签推送：`yyyy-mm-dd-n` 标签会同时跑两个工作流，`-images` 标签则被 `client.yml` 的标签规则排除，只跑 `Server build`。
 
-1. `build`：四组件测试、PyInstaller 打包 Main App（桌面压缩包与 `MinecraftTools-update-*.tar.gz`），再用 `cargo build --release` 编译 Rust Launcher，并把发布公钥与控制端地址编入 Launcher。
+`client.yml` 的发布链路分三段：
+
+1. `build`：客户端和 Launcher 测试、PyInstaller 打包 Main App（桌面压缩包与 `MinecraftTools-update-*.tar.gz`），再用 `cargo build --release` 编译 Rust Launcher，并把发布公钥与控制端地址编入 Launcher。
 2. `installers`（仅标签）：取本平台产物，调用 `client/scripts/package_desktop.py` 生成 `.msi`、`.dmg` 或 `.run`，然后从安装入口启动并验证 Main App 发出的 `READY`。冒烟使用 `--smoke-test --local-fixture`，不访问网络。
 3. `release`：汇总六平台产物，生成 `SHA256SUMS` 和本次通道的 Ed25519 签名清单，创建同名 GitHub Release。Release 共 18 个平台资产：6 个桌面压缩包、6 个更新包、6 个安装包。
 
@@ -75,14 +77,14 @@ Phoenix 的 CI 公钥在 root 的 `authorized_keys` 中标记为 `minecrafttools
 
 ### Docker Hub 镜像
 
-`.github/workflows/images.yml` 在标签推送时构建并推送 Control Server 与 FRP Agent 镜像，两者共用 `yyyy-mm-dd-n` 版本标签。以 `2026-11-25-1` 为例，两个镜像的完整引用如下。
+`.github/workflows/images.yml`（`Server build`）运行 Control Server 与 FRP Agent 的单元测试和 Python lint，并构建、发布镜像；标签推送时测试通过后才推送两个镜像，两者共用 `yyyy-mm-dd-n` 版本标签。以 `2026-11-25-1` 为例，两个镜像的完整引用如下。
 
 ```text
 kindmitaishere/minecrafttools-control:2026-11-25-1
 kindmitaishere/minecrafttools-frp-agent:2026-11-25-1
 ```
 
-每个镜像都包含 `linux/amd64` 与 `linux/arm64`，推送后用 `docker buildx imagetools inspect` 校验两个平台。`main` 分支和 `control/**`、`node/**` 的 PR 只做单平台构建，不推送，用来提前发现 Dockerfile 破损。正式版 Git 标签 `yyyy-mm-dd-n` 直接用作镜像标签。dev 的 Git 标签 `dev-yyyy-mm-dd-n` 去掉 `dev-` 后用作镜像标签。两个通道共享当天的发布序号，避免不同构建占用同一个镜像标签。
+每个镜像都包含 `linux/amd64` 与 `linux/arm64`，推送后用 `docker buildx imagetools inspect` 校验两个平台。`main` 推送和 PR 只在 `control/**`、`node/**` 或工作流自身变更时做单平台构建，不推送，用来提前发现 Dockerfile 破损；标签推送不受路径过滤影响，照常发布双架构镜像。正式版 Git 标签 `yyyy-mm-dd-n` 直接用作镜像标签。dev 的 Git 标签 `dev-yyyy-mm-dd-n` 去掉 `dev-` 后用作镜像标签。两个通道共享当天的发布序号，避免不同构建占用同一个镜像标签。
 
 ### 部署
 

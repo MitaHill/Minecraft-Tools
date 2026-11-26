@@ -102,7 +102,7 @@ Launcher 用一个无边框窗口显示现有开屏图，窗口随实际启动�
 
 ### CI/CD 与桌面安装包
 
-PR 和 `main` 构建并测试四个组件。桌面端在六个原生目标上编译 Rust Launcher，以 PyInstaller `--onedir` 打包 Main App，再把两者组装为一个安装产物。安装后的应用入口指向 Launcher，冒烟测试从该入口启动并验证 Main App 发出的 `READY`。上述流程已由 `.github/workflows/client.yml` 的 `build`、`installers` 和 `release` 三个作业实现：标签构建用 `client/scripts/package_desktop.py` 生成安装包，用 `--smoke-test --local-fixture` 从安装后的入口冒烟，Release 提供 6 个桌面压缩包、6 个更新包和 6 个安装包。macOS 暂用 ad-hoc 签名，Windows 未做 Authenticode；正式签名与公证仍需 Developer ID 证书和 Apple 公证凭据。
+`Client build` 在 PR 和 `main` 上构建并测试客户端与 Launcher；Control Server 和 FRP Agent 的测试随 `Server build` 在 `control/`、`node/` 变更时运行。两者按路径各自触发，发布标签会同时运行。桌面端在六个原生目标上编译 Rust Launcher，以 PyInstaller `--onedir` 打包 Main App，再把两者组装为一个安装产物。安装后的应用入口指向 Launcher，冒烟测试从该入口启动并验证 Main App 发出的 `READY`。上述流程已由 `.github/workflows/client.yml` 的 `build`、`installers` 和 `release` 三个作业实现：标签构建用 `client/scripts/package_desktop.py` 生成安装包，用 `--smoke-test --local-fixture` 从安装后的入口冒烟，Release 提供 6 个桌面压缩包、6 个更新包和 6 个安装包。macOS 暂用 ad-hoc 签名，Windows 未做 Authenticode；正式签名与公证仍需 Developer ID 证书和 Apple 公证凭据。
 
 | 平台 | 首版拟用格式 | 安装方式 |
 | --- | --- | --- |
@@ -110,7 +110,7 @@ PR 和 `main` 构建并测试四个组件。桌面端在六个原生目标上编
 | macOS | `.dmg` | 拖入包含两个组件的 `MinecraftTools.app`。正式版对应用签名并做 Apple 公证。 |
 | Linux | Makeself `.run` | 安装到 `${XDG_DATA_HOME:-~/.local/share}/minecrafttools`，建立 `~/.local/bin/minecrafttools` 和桌面菜单入口，安装目录内提供 `uninstall.sh`。首版以 Ubuntu 24.04 为验证基线。 |
 
-发布标签通过 CI 后，GitHub Release 提供六个安装包、自动更新包和校验文件。首版由 Launcher 自动更新 Main App，Launcher 自身通过完整安装包升级。Control Server 和 FRP Agent 各构建并测试一个覆盖 `linux/amd64` 和 `linux/arm64` 的镜像，再以同一个 `yyyy-mm-dd-n` 标签推送到 [Docker Hub 镜像仓库](build.md#docker-hub-镜像)。该流程已由 `.github/workflows/images.yml` 实现，标签推送时推送双架构镜像，`main` 和 PR 只做单平台构建。
+发布标签通过 CI 后，GitHub Release 提供六个安装包、自动更新包和校验文件。首版由 Launcher 自动更新 Main App，Launcher 自身通过完整安装包升级。Control Server 和 FRP Agent 各构建并测试一个覆盖 `linux/amd64` 和 `linux/arm64` 的镜像，再以同一个 `yyyy-mm-dd-n` 标签推送到 [Docker Hub 镜像仓库](build.md#docker-hub-镜像)。该流程已由 `.github/workflows/images.yml` 实现，标签推送时推送双架构镜像，`main` 推送和 PR 只在 `control/`、`node/` 变更时做单平台构建；单元测试与 lint 也在同一工作流里。
 
 Phoenix 托管更新时，上传作业在构建和验证通过后传输发布文件：先把该通道的 18 个发布文件（6 个更新包、6 个桌面压缩包、6 个安装包）上传到 `DEPLOY_SSH_DIRECTORY/<channel>/artifacts/`，在服务器上核对 SHA-256，再原子切换 `DEPLOY_SSH_DIRECTORY/<channel>.json`，最后删除该通道旧版本的文件。清单里的更新包 URL 指向 `MINECRAFTTOOLS_CONTROL_URL/releases/artifacts/<channel>/`，GitHub Release 只作归档和回滚来源。GitHub 的环境名称、变量和目前的配置状态见[发布环境与凭据](build.md#发布环境与凭据)。
 
