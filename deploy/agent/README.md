@@ -10,7 +10,8 @@
 1. 节点名称
 2. 端口范围
 3. Compose 目录
-4. 镜像标签
+
+镜像标签自动取 GitHub 最新稳定版；需要固定版本时用 `--tag` 覆盖。
 
 `CONTROL_URL` 固定为 `https://ctl.mctools.mitahill.com`。
 
@@ -35,7 +36,7 @@ sudo ./deploy.sh
 节点名称（用于管理台显示）: hk-dev
 端口范围（例如 10000-10002,10004-10005，最多 16 个端口） [30000-30015]: 10000-10002,10004-10005
 Compose 目录 [/opt/minecraft-tools/agent]:
-Agent 镜像标签（例如 2026-11-26-11）: 2026-11-26-11
+自动使用最新稳定版镜像标签: 2026-11-27-8
 ```
 
 端口规则：
@@ -54,9 +55,10 @@ Agent 镜像标签（例如 2026-11-26-11）: 2026-11-26-11
 sudo ./deploy.sh --yes \
   --name hk-dev \
   --ports 10000-10002,10004-10005 \
-  --dir /opt/minecraft-tools/agent \
-  --tag 2026-11-26-11
+  --dir /opt/minecraft-tools/agent
 ```
+
+固定镜像版本时再加 `--tag 2026-11-27-8`。
 
 可用参数见 `./deploy.sh --help`。
 

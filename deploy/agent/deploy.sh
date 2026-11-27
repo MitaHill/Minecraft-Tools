@@ -9,6 +9,7 @@ set -Eeuo pipefail
 CONTROL_URL="https://ctl.mctools.mitahill.com"
 DEFAULT_DIR="/opt/minecraft-tools/agent"
 AGENT_IMAGE="kindmitaishere/minecrafttools-frp-agent"
+DEFAULT_AGENT_TAG="2026-11-27-8"
 DEFAULT_PORTS="30000-30015"
 MAX_PORTS=16
 MIN_PORT=1024
@@ -78,7 +79,7 @@ usage() {
   --dir PATH             Compose 目录（默认 /opt/minecraft-tools/agent）
   --ports SPEC           端口范围，例如 10000-10002,10004-10005（最多 16 个）
   --name NAME            节点名称（用于管理台显示和 Compose 项目名）
-  --tag TAG              Agent 镜像标签，例如 2026-11-26-11
+  --tag TAG              手动指定 Agent 镜像标签（默认取最新稳定版）
   --project NAME         Compose 项目名（默认 minecrafttools-<节点名>）
   --public-port PORT     frpc 连接端口（默认 7000）
   --bind ADDRESS         宿主机监听地址（默认 0.0.0.0，可为 ::）
@@ -593,6 +594,25 @@ random_hex() {
     od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
 }
 
+# Use the latest non-prerelease GitHub release so the operator never has to
+# copy an image tag by hand. Fall back to the tag this script shipped with.
+latest_stable_tag() {
+    local tag=""
+    if command -v curl >/dev/null 2>&1; then
+        tag=$(curl -4 -fsSL --max-time 8 \
+            https://api.github.com/repos/MitaHill/Minecraft-Tools/releases/latest 2>/dev/null |
+            sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)
+    elif command -v wget >/dev/null 2>&1; then
+        tag=$(wget -4 -qO- --timeout=8 \
+            https://api.github.com/repos/MitaHill/Minecraft-Tools/releases/latest 2>/dev/null |
+            sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)
+    fi
+    case "$tag" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[1-9]*) printf '%s' "$tag" ;;
+        *) printf '%s' "$DEFAULT_AGENT_TAG" ;;
+    esac
+}
+
 prepare_secrets() {
     mkdir -p "$DIR/secrets"
     if [ ! -s "$DIR/secrets/frps-admin-password" ]; then
@@ -886,7 +906,8 @@ main() {
         if [ -n "${EXISTING_TAG:-}" ]; then
             TAG_ARG=$EXISTING_TAG
         else
-            TAG_ARG=$(ask "Agent 镜像标签（例如 2026-11-26-11）" "")
+            TAG_ARG=$(latest_stable_tag)
+            info "自动使用最新稳定版镜像标签: ${TAG_ARG}"
         fi
     fi
     AGENT_IMAGE_TAG=$TAG_ARG
