@@ -137,7 +137,6 @@ async function remove() {
       <p class="cell-note">
         逗号分隔，段内用横杠；须落在节点部署范围内<template v-if="editing.deployed_ports">（{{ editing.deployed_ports.map(([start, end]) => range(start, end)).join('、') }}）</template>。
       </p>
-      <p class="cell-note">扩大部署范围需调整节点 NODE_PORT_START/END 与 frps allowPorts，重启 Agent 后生效。</p>
       <p v-if="editing.status !== 'online'">节点上线后可编辑公网地址和允许端口。</p>
       <p v-else-if="!editing.deployed_ports">Agent 同步部署范围后可编辑允许端口。</p>
       <p v-if="saveError" class="action-error" role="alert">{{ saveError }}</p>

@@ -478,8 +478,7 @@ def edit_node(node_id: str, payload: NodeConfiguration, request: Request, accoun
             if not within(ranges, deployed):
                 raise HTTPException(
                     422,
-                    f"映射范围须在节点已部署的端口范围内（当前 {format_spec(deployed)}）；"
-                    "扩大范围需调整节点 NODE_PORT_START/END 与 frps allowPorts 后重启 Agent",
+                    f"映射范围须在节点已部署的端口范围内（当前 {format_spec(deployed)}）",
                 )
             replace_ranges(connection, node_id, ranges, pending=True)
             values.update(range_revision=node["range_revision"] + 1, range_error=None)
